@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+.idea/
+data_tmp/
+ddy_data/
+_google_backup_tmp*/
+gemini*/

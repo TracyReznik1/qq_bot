@@ -188,6 +188,37 @@ def add_memory(memory_key: str, fact: str) -> None:
         write_json(memory_path(memory_key), {"facts": facts[-config.memory_limit :]})
 
 
+def migrate_legacy_memory_files() -> None:
+    legacy_dir = config.data_dir / "legacy_memories"
+    for path in MEMORY_DIR.glob("*.json"):
+        if path.stem.startswith(("private_", "group_")):
+            continue
+
+        legacy_memory = read_json(path, {"facts": []})
+        legacy_facts = legacy_memory.get("facts", []) if isinstance(legacy_memory, dict) else []
+        legacy_facts = [str(item).strip() for item in legacy_facts if str(item).strip()]
+        target_path = memory_path(f"private:{path.stem}")
+
+        if legacy_facts:
+            current_memory = read_json(target_path, {"facts": []})
+            current_facts = current_memory.get("facts", []) if isinstance(current_memory, dict) else []
+            merged_facts = [str(item).strip() for item in current_facts if str(item).strip()]
+            for fact in legacy_facts:
+                if fact not in merged_facts:
+                    merged_facts.append(fact)
+            write_json(target_path, {"facts": merged_facts[-config.memory_limit :]})
+
+        legacy_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = legacy_dir / path.name
+        if archive_path.exists():
+            archive_path = legacy_dir / f"{path.stem}_{int(time.time())}.json"
+        path.replace(archive_path)
+        logger.info("Archived legacy memory file %s to %s", path, archive_path)
+
+
+migrate_legacy_memory_files()
+
+
 class OneBotClient:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -363,12 +394,17 @@ def detect_intent(text: str) -> dict[str, str]:
                 {
                     "role": "system",
                     "content": (
-                        "你是 QQ 机器人消息路由器。只输出一个 JSON 对象，不要解释。"
+                        "你是 QQ 机器人消息路由器，要根据语义判断用户想做什么。"
+                        "只输出一个 JSON 对象，不要解释。"
                         "格式：{\"action\":\"chat|web_search|weather|remember\","
                         "\"query\":\"\",\"memory\":\"\"}。"
-                        "规则：用户要实时、最新、新闻、网页资料时用 web_search；"
-                        "问天气、气温、下雨、温度时用 weather；"
-                        "明确要求记住某件事时用 remember；其他都用 chat。"
+                        "判断标准："
+                        "如果用户在问天气、温度、下雨、空气质量、未来天气，action=weather，query 填地点或原问题；"
+                        "如果用户明确让你记住个人信息、偏好、名字、生日等，action=remember，memory 填要记住的事实；"
+                        "如果用户想了解一个概念、缩写、陌生词、人物、作品、项目、品牌、新闻、最新情况、官网、资料，"
+                        "或你判断需要外部事实核验才能靠谱回答，action=web_search，query 填最适合搜索的关键词；"
+                        "只有寒暄、情绪陪聊、创作、翻译、改写、解释常识、数学/代码推理等不需要联网的请求，action=chat。"
+                        "遇到拿不准的专名或短词时，优先 web_search，不要因为自己不知道就直接 chat。"
                     ),
                 },
                 {"role": "user", "content": text},
@@ -414,6 +450,16 @@ def web_search(query: str) -> str:
         href = result.get("href") or result.get("url") or ""
         lines.append(f"{index}. {title}\n摘要：{body}\n链接：{href}")
     return "\n\n".join(lines)
+
+
+def has_search_results(search_info: str) -> bool:
+    failure_messages = [
+        "没有可搜索的关键词。",
+        "网页搜索组件 ddgs 没有安装。",
+        "网页搜索失败，可能是网络或代理暂时不可用。",
+        "没有搜到有用结果。",
+    ]
+    return not any(message in search_info for message in failure_messages)
 
 
 def extract_weather_city(text: str) -> str:
@@ -673,7 +719,8 @@ def process_message(data: dict[str, Any]) -> None:
             return
         if action == "web_search":
             search_info = web_search(query)
-            reply = generate_reply(session_key, raw_msg, f"网页搜索结果：\n{search_info}")
+            tool_context = f"网页搜索结果：\n{search_info}" if has_search_results(search_info) else ""
+            reply = generate_reply(session_key, raw_msg, tool_context)
             send_reply(target_id, reply, is_group)
             return
 

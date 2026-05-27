@@ -141,22 +141,27 @@ Image actions are intentionally not supported.
 
 Intent routing has two layers.
 
-First, `rule_based_intent()` handles obvious commands and common Chinese phrases:
+First, `rule_based_intent()` handles deterministic shortcuts and common phrases:
 
 - help/menu
 - remember
 - `/search`
 - `/weather`
 - weather words
-- search/latest/news words
+- explicit search/latest/news words
+- English or numeric nicknames followed by identity questions such as "是谁"
 
-Second, `detect_intent()` asks DeepSeek to classify unclear messages into one of:
+Second, `detect_intent()` asks DeepSeek to classify normal natural-language
+messages into one of:
 
 ```text
 chat | web_search | weather | remember
 ```
 
-This keeps common requests fast and makes ambiguous natural language flexible.
+This keeps common requests fast while making ambiguous natural language flexible.
+For unfamiliar terms, acronyms, names, current facts, and anything that needs
+external verification, ATRI asks the router model to choose `web_search`.
+If search returns no usable result, ATRI falls back to normal chat.
 
 When adding new features, prefer this pattern:
 
@@ -212,6 +217,10 @@ atri_data/memories/group_987654_123456.json
 
 This prevents facts remembered in private chat from automatically affecting the
 same user in group chat, and also separates memories for different groups.
+
+Legacy unscoped memory files such as `atri_data/memories/123456.json` are merged
+into the matching private-chat memory and archived under
+`atri_data/legacy_memories/` on startup.
 
 Shape:
 

@@ -8,7 +8,7 @@
 - 群聊默认需要 @ ATRI 才响应
 - 网页搜索后再回答
 - 查询天气
-- 简单用户记忆
+- 按私聊/群聊区分的简单记忆
 - DeepSeek、OneBot、代理、端口都从 `.env` 配置
 
 ## 安装
@@ -66,4 +66,4 @@ http://127.0.0.1:5000/health
 - `run_bot.py`：机器人主程序
 - `test_deepseek.py`：DeepSeek 连通性测试
 - `.env.example`：配置模板
-- `atri_data/memories`：用户记忆
+- `atri_data/memories`：按会话作用域保存的用户记忆

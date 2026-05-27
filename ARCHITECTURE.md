@@ -182,7 +182,7 @@ It builds messages using:
 The system prompt includes:
 
 - ATRI persona
-- saved user memory
+- saved memory for the current conversation scope
 - optional external context, such as web search results
 
 `chat_history` is an in-process dictionary. It resets when the bot restarts.
@@ -198,11 +198,20 @@ User memory is stored as JSON files under:
 atri_data/memories/
 ```
 
-Each user gets one file:
+Memory is scoped by conversation:
+
+- private chat: `private:<uid>`
+- group chat: `group:<group_id>:<uid>`
+
+The scoped key is sanitized for the filename, so examples look like:
 
 ```text
-atri_data/memories/<user_id>.json
+atri_data/memories/private_123456.json
+atri_data/memories/group_987654_123456.json
 ```
+
+This prevents facts remembered in private chat from automatically affecting the
+same user in group chat, and also separates memories for different groups.
 
 Shape:
 
@@ -234,8 +243,9 @@ Web search:
 
 Weather:
 
-- uses `wttr.in` JSON format
-- falls back to web search if the weather API fails
+- uses Open-Meteo geocoding and forecast APIs first
+- falls back to `wttr.in` JSON format if Open-Meteo fails
+- falls back to web search if both weather APIs fail
 
 Proxy:
 

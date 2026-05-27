@@ -161,27 +161,31 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _get_user_memory_unlocked(uid: str) -> dict[str, list[str]]:
-    data = read_json(MEMORY_DIR / f"{safe_id(uid)}.json", {"facts": []})
+def memory_path(memory_key: str) -> Path:
+    return MEMORY_DIR / f"{safe_id(memory_key)}.json"
+
+
+def _get_memory_unlocked(memory_key: str) -> dict[str, list[str]]:
+    data = read_json(memory_path(memory_key), {"facts": []})
     facts = data.get("facts", []) if isinstance(data, dict) else []
     facts = [str(item).strip() for item in facts if str(item).strip()]
     return {"facts": facts[-config.memory_limit :]}
 
 
-def get_user_memory(uid: str) -> dict[str, list[str]]:
+def get_memory(memory_key: str) -> dict[str, list[str]]:
     with memory_lock:
-        return _get_user_memory_unlocked(uid)
+        return _get_memory_unlocked(memory_key)
 
 
-def add_user_memory(uid: str, fact: str) -> None:
+def add_memory(memory_key: str, fact: str) -> None:
     fact = fact.strip()
     if not fact:
         return
     with memory_lock:
-        memory = _get_user_memory_unlocked(uid)
+        memory = _get_memory_unlocked(memory_key)
         facts = [item for item in memory["facts"] if item != fact]
         facts.append(fact)
-        write_json(MEMORY_DIR / f"{safe_id(uid)}.json", {"facts": facts[-config.memory_limit :]})
+        write_json(memory_path(memory_key), {"facts": facts[-config.memory_limit :]})
 
 
 class OneBotClient:
@@ -329,6 +333,12 @@ def rule_based_intent(text: str) -> dict[str, str] | None:
         )
         return {"action": "weather", "query": query}
 
+    if re.search(
+        r"(?:[A-Za-z0-9_.-]{2,}\s*(?:是谁|是什么|是啥|介绍一下)|介绍一下\s*[A-Za-z0-9_.-]{2,})",
+        normalized,
+    ):
+        return {"action": "web_search", "query": normalized}
+
     if any(
         word in normalized
         for word in ["搜索", "搜一下", "查一下", "查询", "查查", "网页", "资料", "新闻", "最新", "官网", "现在"]
@@ -415,45 +425,155 @@ def extract_weather_city(text: str) -> str:
     return re.sub(r"\s+", " ", city).strip(" ，。,.?？!！")
 
 
+OPEN_METEO_WEATHER_CODES = {
+    0: "晴",
+    1: "大部晴朗",
+    2: "局部多云",
+    3: "阴",
+    45: "有雾",
+    48: "雾凇",
+    51: "小毛毛雨",
+    53: "中等毛毛雨",
+    55: "大毛毛雨",
+    56: "小冻毛毛雨",
+    57: "大冻毛毛雨",
+    61: "小雨",
+    63: "中雨",
+    65: "大雨",
+    66: "小冻雨",
+    67: "大冻雨",
+    71: "小雪",
+    73: "中雪",
+    75: "大雪",
+    77: "雪粒",
+    80: "小阵雨",
+    81: "中等阵雨",
+    82: "强阵雨",
+    85: "小阵雪",
+    86: "大阵雪",
+    95: "雷暴",
+    96: "雷暴伴小冰雹",
+    99: "雷暴伴大冰雹",
+}
+
+
+def first_item(value: Any) -> Any:
+    if isinstance(value, list) and value:
+        return value[0]
+    return None
+
+
+def format_location_name(location: dict[str, Any]) -> str:
+    parts = [
+        str(location.get("name") or "").strip(),
+        str(location.get("admin1") or "").strip(),
+        str(location.get("country") or "").strip(),
+    ]
+    return "，".join(part for part in parts if part)
+
+
+def open_meteo_weather_lookup(city: str) -> str:
+    geo_response = requests.get(
+        "https://geocoding-api.open-meteo.com/v1/search",
+        params={"name": city, "count": 1, "language": "zh", "format": "json"},
+        proxies=config.proxies,
+        timeout=config.request_timeout,
+        headers={"User-Agent": "qq-bot-weather/1.0"},
+    )
+    geo_response.raise_for_status()
+    geo_data = geo_response.json()
+    locations = geo_data.get("results") or []
+    if not locations:
+        raise ValueError(f"Open-Meteo geocoding found no location for {city}")
+
+    location = locations[0]
+    latitude = location["latitude"]
+    longitude = location["longitude"]
+    forecast_response = requests.get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+            "latitude": latitude,
+            "longitude": longitude,
+            "current": "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m",
+            "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+            "forecast_days": 1,
+            "timezone": location.get("timezone") or "auto",
+        },
+        proxies=config.proxies,
+        timeout=config.request_timeout,
+        headers={"User-Agent": "qq-bot-weather/1.0"},
+    )
+    forecast_response.raise_for_status()
+    forecast = forecast_response.json()
+    current = forecast["current"]
+    daily = forecast.get("daily") or {}
+    code = current.get("weather_code")
+    desc = OPEN_METEO_WEATHER_CODES.get(int(code), "天气状况未知") if code is not None else "天气状况未知"
+    location_name = format_location_name(location) or city
+
+    min_temp = first_item(daily.get("temperature_2m_min"))
+    max_temp = first_item(daily.get("temperature_2m_max"))
+    rain_probability = first_item(daily.get("precipitation_probability_max"))
+    rain_text = f"，最高降水概率 {rain_probability}%" if rain_probability is not None else ""
+    daily_text = f"今天 {min_temp}~{max_temp}°C{rain_text}。" if min_temp is not None and max_temp is not None else ""
+
+    return (
+        f"{city}（{location_name}）现在 {current.get('temperature_2m')}°C，"
+        f"体感 {current.get('apparent_temperature')}°C，{desc}，"
+        f"湿度 {current.get('relative_humidity_2m')}%，风速 {current.get('wind_speed_10m')}km/h。\n"
+        f"{daily_text}"
+    ).strip()
+
+
+def wttr_weather_lookup(city: str) -> str:
+    url = f"https://wttr.in/{quote(city)}?format=j1&lang=zh"
+    response = requests.get(
+        url,
+        proxies=config.proxies,
+        timeout=config.request_timeout,
+        headers={"User-Agent": "qq-bot-weather/1.0"},
+    )
+    response.raise_for_status()
+    data = response.json()
+    current = data["current_condition"][0]
+    today = data["weather"][0]
+    desc = current.get("lang_zh", current.get("weatherDesc", [{"value": ""}]))
+    desc_text = desc[0].get("value", "") if isinstance(desc, list) and desc else str(desc)
+
+    rain_chance = ""
+    hourly = today.get("hourly") or []
+    chances = [
+        int(item.get("chanceofrain", 0))
+        for item in hourly
+        if str(item.get("chanceofrain", "")).isdigit()
+    ]
+    if chances:
+        rain_chance = f"，最高降雨概率 {max(chances)}%"
+
+    return (
+        f"{city} 现在 {current.get('temp_C')}°C，体感 {current.get('FeelsLikeC')}°C，"
+        f"{desc_text}，湿度 {current.get('humidity')}%，风速 {current.get('windspeedKmph')}km/h。\n"
+        f"今天 {today.get('mintempC')}~{today.get('maxtempC')}°C{rain_chance}。"
+    )
+
+
 def weather_lookup(city: str, original_text: str) -> str:
     city = extract_weather_city(city or original_text)
     if not city:
         return "想查哪里的天气？比如：北京天气。"
 
     try:
-        url = f"https://wttr.in/{quote(city)}?format=j1&lang=zh"
-        response = requests.get(
-            url,
-            proxies=config.proxies,
-            timeout=config.request_timeout,
-            headers={"User-Agent": "qq-bot-weather/1.0"},
-        )
-        response.raise_for_status()
-        data = response.json()
-        current = data["current_condition"][0]
-        today = data["weather"][0]
-        desc = current.get("lang_zh", current.get("weatherDesc", [{"value": ""}]))
-        desc_text = desc[0].get("value", "") if isinstance(desc, list) and desc else str(desc)
-
-        rain_chance = ""
-        hourly = today.get("hourly") or []
-        chances = [
-            int(item.get("chanceofrain", 0))
-            for item in hourly
-            if str(item.get("chanceofrain", "")).isdigit()
-        ]
-        if chances:
-            rain_chance = f"，最高降雨概率 {max(chances)}%"
-
-        return (
-            f"{city} 现在 {current.get('temp_C')}°C，体感 {current.get('FeelsLikeC')}°C，"
-            f"{desc_text}，湿度 {current.get('humidity')}%，风速 {current.get('windspeedKmph')}km/h。\n"
-            f"今天 {today.get('mintempC')}~{today.get('maxtempC')}°C{rain_chance}。"
-        )
+        return open_meteo_weather_lookup(city)
     except Exception:
-        logger.exception("Weather lookup failed")
-        search_info = web_search(f"{city} 天气")
-        return f"天气接口没连上，我先按网页结果给你查：\n{search_info}"
+        logger.exception("Open-Meteo weather lookup failed")
+
+    try:
+        return wttr_weather_lookup(city)
+    except Exception:
+        logger.exception("wttr.in weather lookup failed")
+
+    search_info = web_search(f"{city} 天气")
+    return f"天气接口都没连上，我先按网页结果给你查：\n{search_info}"
 
 
 def append_history(session_key: str, user_text: str, assistant_text: str) -> None:
@@ -468,8 +588,8 @@ def append_history(session_key: str, user_text: str, assistant_text: str) -> Non
         chat_history[session_key] = history[-max(config.history_turns, 1) * 2 :]
 
 
-def build_system_prompt(uid: str, tool_context: str = "") -> str:
-    memory = get_user_memory(uid)
+def build_system_prompt(memory_key: str, tool_context: str = "") -> str:
+    memory = get_memory(memory_key)
     memory_text = "；".join(memory["facts"][-8:]) or "暂无"
     context = tool_context.strip() or "暂无"
     return (
@@ -480,8 +600,8 @@ def build_system_prompt(uid: str, tool_context: str = "") -> str:
     )
 
 
-def generate_reply(uid: str, session_key: str, text: str, tool_context: str = "") -> str:
-    messages = [{"role": "system", "content": build_system_prompt(uid, tool_context)}]
+def generate_reply(session_key: str, text: str, tool_context: str = "") -> str:
+    messages = [{"role": "system", "content": build_system_prompt(session_key, tool_context)}]
     with chat_history_lock:
         messages.extend(chat_history.get(session_key, []).copy())
     messages.append({"role": "user", "content": text})
@@ -545,7 +665,7 @@ def process_message(data: dict[str, Any]) -> None:
             return
         if action == "remember":
             memory = intent.get("memory") or query
-            add_user_memory(uid, memory)
+            add_memory(session_key, memory)
             send_reply(target_id, "记住了。", is_group)
             return
         if action == "weather":
@@ -553,11 +673,11 @@ def process_message(data: dict[str, Any]) -> None:
             return
         if action == "web_search":
             search_info = web_search(query)
-            reply = generate_reply(uid, session_key, raw_msg, f"网页搜索结果：\n{search_info}")
+            reply = generate_reply(session_key, raw_msg, f"网页搜索结果：\n{search_info}")
             send_reply(target_id, reply, is_group)
             return
 
-        reply = generate_reply(uid, session_key, raw_msg)
+        reply = generate_reply(session_key, raw_msg)
         send_reply(target_id, reply, is_group)
     except RuntimeError as error:
         logger.exception("Configuration error")

@@ -3,8 +3,11 @@ import logging
 import os
 import re
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any
 from urllib.parse import quote
 
@@ -92,10 +95,22 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("qq-bot")
 
 chat_history: dict[str, list[dict[str, str]]] = {}
+chat_history_lock = Lock()
+message_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="qq-message")
+processed_message_ids: set[str] = set()
+processed_message_order: deque[str] = deque()
+processed_message_lock = Lock()
+MAX_PROCESSED_MESSAGE_IDS = 500
 
 
 def safe_id(value: Any) -> str:
     return re.sub(r"[^0-9A-Za-z_-]", "_", str(value or "unknown"))
+
+
+def build_session_key(uid: str, data: dict[str, Any], is_group: bool) -> str:
+    if is_group:
+        return f"group:{safe_id(data.get('group_id'))}:{safe_id(uid)}"
+    return f"private:{safe_id(uid)}"
 
 
 def read_json(path: Path, default: Any) -> Any:
@@ -401,15 +416,16 @@ def weather_lookup(city: str, original_text: str) -> str:
         return f"天气接口没连上，我先按网页结果给你查：\n{search_info}"
 
 
-def append_history(uid: str, user_text: str, assistant_text: str) -> None:
-    history = chat_history.setdefault(uid, [])
-    history.extend(
-        [
-            {"role": "user", "content": user_text},
-            {"role": "assistant", "content": assistant_text},
-        ]
-    )
-    chat_history[uid] = history[-max(config.history_turns, 1) * 2 :]
+def append_history(session_key: str, user_text: str, assistant_text: str) -> None:
+    with chat_history_lock:
+        history = chat_history.setdefault(session_key, [])
+        history.extend(
+            [
+                {"role": "user", "content": user_text},
+                {"role": "assistant", "content": assistant_text},
+            ]
+        )
+        chat_history[session_key] = history[-max(config.history_turns, 1) * 2 :]
 
 
 def build_system_prompt(uid: str, tool_context: str = "") -> str:
@@ -424,13 +440,14 @@ def build_system_prompt(uid: str, tool_context: str = "") -> str:
     )
 
 
-def generate_reply(uid: str, text: str, tool_context: str = "") -> str:
+def generate_reply(uid: str, session_key: str, text: str, tool_context: str = "") -> str:
     messages = [{"role": "system", "content": build_system_prompt(uid, tool_context)}]
-    messages.extend(chat_history.get(uid, []))
+    with chat_history_lock:
+        messages.extend(chat_history.get(session_key, []).copy())
     messages.append({"role": "user", "content": text})
     reply = deepseek.chat(messages, temperature=0.75)
     reply = re.sub(r"\[(?:SRCH|MEM|CHAT):?.*?\]", "", reply).strip()
-    append_history(uid, text, reply)
+    append_history(session_key, text, reply)
     return reply
 
 
@@ -444,9 +461,11 @@ def split_reply(text: str) -> list[str]:
     while len(text) > limit:
         cut = max(text.rfind("\n", 0, limit), text.rfind("。", 0, limit), text.rfind("，", 0, limit))
         if cut < limit // 2:
-            cut = limit
-        parts.append(text[: cut + 1].strip())
-        text = text[cut + 1 :].strip()
+            parts.append(text[:limit].strip())
+            text = text[limit:].strip()
+        else:
+            parts.append(text[: cut + 1].strip())
+            text = text[cut + 1 :].strip()
     if text:
         parts.append(text)
     return parts
@@ -467,6 +486,7 @@ def process_message(data: dict[str, Any]) -> None:
     is_group = data.get("message_type") == "group"
     self_id = str(data.get("self_id", ""))
     target_id = data.get("group_id") if is_group else uid
+    session_key = build_session_key(uid, data, is_group)
 
     if is_group and config.require_group_at:
         mentioned, raw_msg = strip_bot_mention(raw_msg, self_id)
@@ -493,11 +513,11 @@ def process_message(data: dict[str, Any]) -> None:
             return
         if action == "web_search":
             search_info = web_search(query)
-            reply = generate_reply(uid, raw_msg, f"网页搜索结果：\n{search_info}")
+            reply = generate_reply(uid, session_key, raw_msg, f"网页搜索结果：\n{search_info}")
             send_reply(target_id, reply, is_group)
             return
 
-        reply = generate_reply(uid, raw_msg)
+        reply = generate_reply(uid, session_key, raw_msg)
         send_reply(target_id, reply, is_group)
     except RuntimeError as error:
         logger.exception("Configuration error")
@@ -507,11 +527,36 @@ def process_message(data: dict[str, Any]) -> None:
         send_reply(target_id, "我这边处理失败了，先缓一缓再试。", is_group)
 
 
+def mark_message_seen(data: dict[str, Any]) -> bool:
+    message_id = data.get("message_id")
+    if message_id is None:
+        return True
+
+    key = f"{data.get('self_id', '')}:{message_id}"
+    with processed_message_lock:
+        if key in processed_message_ids:
+            return False
+
+        processed_message_ids.add(key)
+        processed_message_order.append(key)
+        while len(processed_message_order) > MAX_PROCESSED_MESSAGE_IDS:
+            old_key = processed_message_order.popleft()
+            processed_message_ids.discard(old_key)
+        return True
+
+
+def process_message_safely(data: dict[str, Any]) -> None:
+    try:
+        process_message(data)
+    except Exception:
+        logger.exception("Background message processing failed")
+
+
 @app.route("/", methods=["POST"])
 def onebot_event() -> dict[str, str]:
     data = request.get_json(silent=True) or {}
-    if data.get("post_type") == "message":
-        process_message(data)
+    if data.get("post_type") == "message" and mark_message_seen(data):
+        message_executor.submit(process_message_safely, data)
     return {"status": "ok"}
 
 

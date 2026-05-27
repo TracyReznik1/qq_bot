@@ -182,6 +182,9 @@ The system prompt includes:
 - optional external context, such as web search results
 
 `chat_history` is an in-process dictionary. It resets when the bot restarts.
+History is keyed by conversation scope: `private:<uid>` for private chat and
+`group:<group_id>:<uid>` for group chat, so the same user's contexts do not mix
+between private chat and different groups.
 
 ## Memory
 

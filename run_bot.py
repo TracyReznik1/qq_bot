@@ -14,7 +14,7 @@ from flask import Flask, request
 
 try:
     from ddgs import DDGS
-except ImportError:  # The bot can still chat, weather-check, and fetch images.
+except ImportError:
     DDGS = None
 
 
@@ -44,8 +44,7 @@ def env_float(name: str, default: float) -> float:
 
 
 def resolve_path(value: str, default: str) -> Path:
-    raw = value or default
-    path = Path(raw)
+    path = Path(value or default)
     if not path.is_absolute():
         path = BASE_DIR / path
     return path
@@ -53,10 +52,10 @@ def resolve_path(value: str, default: str) -> Path:
 
 @dataclass(frozen=True)
 class Config:
-    bot_name: str = os.getenv("BOT_NAME", "ddy")
+    bot_name: str = os.getenv("BOT_NAME", "ATRI")
     bot_persona: str = os.getenv(
         "BOT_PERSONA",
-        "你是一个 QQ 聊天机器人，名字叫 ddy。说话自然、有点傲娇毒舌，但要友好、简洁、靠谱。",
+        "你是 ATRI，一个 QQ 聊天机器人。说话自然、可爱、有一点吐槽感，但要友好、简洁、靠谱。",
     )
     deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
     deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
@@ -68,9 +67,7 @@ class Config:
     proxy_url: str = os.getenv("PROXY_URL", "")
     port: int = env_int("BOT_PORT", 5000)
     require_group_at: bool = env_bool("REQUIRE_GROUP_AT", True)
-    enable_r18: bool = env_bool("ENABLE_R18", False)
-    data_dir: Path = resolve_path(os.getenv("DATA_DIR", ""), "ddy_data")
-    tmp_img_dir: Path = resolve_path(os.getenv("TMP_IMG_DIR", ""), "data_tmp")
+    data_dir: Path = resolve_path(os.getenv("DATA_DIR", ""), "atri_data")
     search_max_results: int = env_int("SEARCH_MAX_RESULTS", 4)
     history_turns: int = env_int("HISTORY_TURNS", 8)
     memory_limit: int = env_int("MEMORY_LIMIT", 30)
@@ -88,23 +85,17 @@ config = Config()
 app = Flask(__name__)
 
 MEMORY_DIR = config.data_dir / "memories"
-IMG_HISTORY_DIR = config.data_dir / "img_history"
-for directory in [config.data_dir, MEMORY_DIR, IMG_HISTORY_DIR, config.tmp_img_dir]:
+for directory in [config.data_dir, MEMORY_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("qq-bot")
 
 chat_history: dict[str, list[dict[str, str]]] = {}
-pending_r18: dict[str, dict[str, str]] = {}
 
 
 def safe_id(value: Any) -> str:
-    text = str(value or "unknown")
-    return re.sub(r"[^0-9A-Za-z_-]", "_", text)
+    return re.sub(r"[^0-9A-Za-z_-]", "_", str(value or "unknown"))
 
 
 def read_json(path: Path, default: Any) -> Any:
@@ -138,17 +129,6 @@ def add_user_memory(uid: str, fact: str) -> None:
     write_json(MEMORY_DIR / f"{safe_id(uid)}.json", {"facts": facts[-config.memory_limit :]})
 
 
-def get_img_history(uid: str) -> set[str]:
-    data = read_json(IMG_HISTORY_DIR / f"{safe_id(uid)}.json", [])
-    if not isinstance(data, list):
-        return set()
-    return {str(item) for item in data}
-
-
-def save_img_history(uid: str, history: set[str]) -> None:
-    write_json(IMG_HISTORY_DIR / f"{safe_id(uid)}.json", sorted(history))
-
-
 class OneBotClient:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -163,6 +143,7 @@ class OneBotClient:
         message = (message or "").strip()
         if not message:
             return
+
         endpoint = "send_group_msg" if is_group else "send_private_msg"
         payload_key = "group_id" if is_group else "user_id"
         payload = {payload_key: target_id, "message": message}
@@ -220,11 +201,11 @@ deepseek = DeepSeekClient(config)
 
 def help_text() -> str:
     return (
-        f"我是 {config.bot_name}，能聊天、搜网页、查天气、搜图。\n"
+        f"我是 {config.bot_name}，能聊天、查天气、搜索网页后回答。\n"
         "用法示例：\n"
-        "查一下 DeepSeek 最新消息\n"
+        "你好\n"
         "北京天气\n"
-        "搜图 猫耳少女\n"
+        "查一下 DeepSeek 最新消息\n"
         "记住 我喜欢简洁回答\n"
         "群聊里默认需要 @ 我。"
     )
@@ -258,8 +239,7 @@ def remove_command_words(text: str, words: list[str]) -> str:
     result = text
     for word in words:
         result = result.replace(word, " ")
-    result = re.sub(r"\s+", " ", result).strip(" ，。,.?？!！")
-    return result
+    return re.sub(r"\s+", " ", result).strip(" ，。,.?？!！")
 
 
 def rule_based_intent(text: str) -> dict[str, str] | None:
@@ -287,25 +267,12 @@ def rule_based_intent(text: str) -> dict[str, str] | None:
             "query": remove_command_words(normalized, ["/weather", "weather"]),
         }
 
-    if lowered.startswith(("/image", "/img", "image ", "img ")):
-        return {
-            "action": "image_search",
-            "query": remove_command_words(normalized, ["/image", "/img", "image", "img"]),
-        }
-
     if any(word in normalized for word in ["天气", "气温", "温度", "降雨", "下雨", "空气质量"]):
         query = remove_command_words(
             normalized,
             ["帮我", "查一下", "查询", "查查", "看看", "天气", "气温", "温度", "降雨", "下雨", "空气质量"],
         )
         return {"action": "weather", "query": query}
-
-    if any(word in normalized for word in ["搜图", "发图", "来张", "图片", "照片", "壁纸", "头像", "P站", "p站"]):
-        query = remove_command_words(
-            normalized,
-            ["帮我", "给我", "搜图", "发图", "来张", "一张", "图片", "照片", "壁纸", "头像", "看看"],
-        )
-        return {"action": "image_search", "query": query}
 
     if any(
         word in normalized
@@ -332,10 +299,9 @@ def detect_intent(text: str) -> dict[str, str]:
                     "role": "system",
                     "content": (
                         "你是 QQ 机器人消息路由器。只输出一个 JSON 对象，不要解释。"
-                        "格式：{\"action\":\"chat|web_search|image_search|weather|remember\","
+                        "格式：{\"action\":\"chat|web_search|weather|remember\","
                         "\"query\":\"\",\"memory\":\"\"}。"
                         "规则：用户要实时、最新、新闻、网页资料时用 web_search；"
-                        "要图片、照片、壁纸、头像、搜图、P站时用 image_search；"
                         "问天气、气温、下雨、温度时用 weather；"
                         "明确要求记住某件事时用 remember；其他都用 chat。"
                     ),
@@ -343,11 +309,11 @@ def detect_intent(text: str) -> dict[str, str]:
                 {"role": "user", "content": text},
             ],
             temperature=0,
-            max_tokens=160,
+            max_tokens=140,
         )
         data = extract_json(decision) or {}
         action = str(data.get("action", "chat")).strip()
-        if action not in {"chat", "web_search", "image_search", "weather", "remember"}:
+        if action not in {"chat", "web_search", "weather", "remember"}:
             action = "chat"
         return {
             "action": action,
@@ -391,8 +357,7 @@ def extract_weather_city(text: str) -> str:
         ["帮我", "查一下", "查询", "查查", "看看", "今天", "明天", "现在", "天气", "气温", "温度", "降雨", "下雨", "空气质量"],
     )
     city = re.sub(r"(会不会|怎么样|如何|多少|吗|呢|呀|啊)", " ", city)
-    city = re.sub(r"\s+", " ", city).strip(" ，。,.?？!！")
-    return city
+    return re.sub(r"\s+", " ", city).strip(" ，。,.?？!！")
 
 
 def weather_lookup(city: str, original_text: str) -> str:
@@ -413,17 +378,17 @@ def weather_lookup(city: str, original_text: str) -> str:
         current = data["current_condition"][0]
         today = data["weather"][0]
         desc = current.get("lang_zh", current.get("weatherDesc", [{"value": ""}]))
-        if isinstance(desc, list) and desc:
-            desc_text = desc[0].get("value", "")
-        else:
-            desc_text = str(desc)
+        desc_text = desc[0].get("value", "") if isinstance(desc, list) and desc else str(desc)
 
         rain_chance = ""
         hourly = today.get("hourly") or []
-        if hourly:
-            chances = [int(h.get("chanceofrain", 0)) for h in hourly if str(h.get("chanceofrain", "")).isdigit()]
-            if chances:
-                rain_chance = f"，最高降雨概率 {max(chances)}%"
+        chances = [
+            int(item.get("chanceofrain", 0))
+            for item in hourly
+            if str(item.get("chanceofrain", "")).isdigit()
+        ]
+        if chances:
+            rain_chance = f"，最高降雨概率 {max(chances)}%"
 
         return (
             f"{city} 现在 {current.get('temp_C')}°C，体感 {current.get('FeelsLikeC')}°C，"
@@ -436,85 +401,6 @@ def weather_lookup(city: str, original_text: str) -> str:
         return f"天气接口没连上，我先按网页结果给你查：\n{search_info}"
 
 
-def image_key(info: dict[str, Any]) -> str:
-    return f"{info.get('pid')}:{info.get('p', 0)}"
-
-
-def image_keyword(text: str) -> str:
-    keyword = remove_command_words(
-        text,
-        ["帮我", "给我", "搜图", "发图", "来张", "一张", "图片", "照片", "壁纸", "头像", "看看", "P站", "p站", "画师"],
-    )
-    return keyword or "原创"
-
-
-def download_image(url: str, uid: str, info: dict[str, Any]) -> Path:
-    normalized_url = url.replace("i.pximg.net", "i.pixiv.re")
-    suffix_match = re.search(r"\.(jpg|jpeg|png|webp)(?:\?|$)", normalized_url, flags=re.I)
-    suffix = f".{suffix_match.group(1).lower()}" if suffix_match else ".jpg"
-    path = config.tmp_img_dir / f"{safe_id(uid)}_{info.get('pid')}_{info.get('p', 0)}{suffix}"
-
-    response = requests.get(
-        normalized_url,
-        proxies=config.proxies,
-        timeout=max(config.request_timeout, 30),
-        headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.pixiv.net/"},
-    )
-    response.raise_for_status()
-    path.write_bytes(response.content)
-    return path
-
-
-def fetch_pixiv_image(keyword: str, uid: str) -> dict[str, Any] | None:
-    keyword = image_keyword(keyword)
-    history = get_img_history(uid)
-    params = {
-        "keyword": keyword,
-        "num": 10,
-        "r18": 2 if config.enable_r18 else 0,
-        "size": "regular",
-    }
-
-    try:
-        response = requests.get(
-            "https://api.lolicon.app/setu/v2",
-            params=params,
-            proxies=config.proxies,
-            timeout=max(config.request_timeout, 20),
-        )
-        response.raise_for_status()
-        data = response.json()
-        images = data.get("data") or []
-        if not images:
-            return None
-
-        fresh = [item for item in images if image_key(item) not in history]
-        candidates = fresh or images
-        if config.enable_r18:
-            safe = [item for item in candidates if not item.get("r18")]
-            candidates = safe or candidates
-
-        info = candidates[0]
-        urls = info.get("urls") or {}
-        raw_url = urls.get("regular") or urls.get("original") or urls.get("small")
-        if not raw_url:
-            return None
-
-        file_path = download_image(raw_url, uid, info)
-        abs_path = file_path.resolve().as_posix()
-        key = image_key(info)
-        return {
-            "cq": f"[CQ:image,file=file:///{abs_path}]",
-            "key": key,
-            "is_r18": bool(info.get("r18")),
-            "title": info.get("title") or keyword,
-            "author": info.get("author") or "",
-        }
-    except Exception:
-        logger.exception("Image search failed")
-        return None
-
-
 def append_history(uid: str, user_text: str, assistant_text: str) -> None:
     history = chat_history.setdefault(uid, [])
     history.extend(
@@ -523,8 +409,7 @@ def append_history(uid: str, user_text: str, assistant_text: str) -> None:
             {"role": "assistant", "content": assistant_text},
         ]
     )
-    max_messages = max(config.history_turns, 1) * 2
-    chat_history[uid] = history[-max_messages:]
+    chat_history[uid] = history[-max(config.history_turns, 1) * 2 :]
 
 
 def build_system_prompt(uid: str, tool_context: str = "") -> str:
@@ -544,7 +429,7 @@ def generate_reply(uid: str, text: str, tool_context: str = "") -> str:
     messages.extend(chat_history.get(uid, []))
     messages.append({"role": "user", "content": text})
     reply = deepseek.chat(messages, temperature=0.75)
-    reply = re.sub(r"\[(?:SRCH|P_IMG|MEM|CHAT):?.*?\]", "", reply).strip()
+    reply = re.sub(r"\[(?:SRCH|MEM|CHAT):?.*?\]", "", reply).strip()
     append_history(uid, text, reply)
     return reply
 
@@ -553,6 +438,7 @@ def split_reply(text: str) -> list[str]:
     text = (text or "").strip()
     if not text:
         return []
+
     limit = max(config.max_reply_chars, 200)
     parts = []
     while len(text) > limit:
@@ -572,43 +458,6 @@ def send_reply(target_id: Any, text: str, is_group: bool) -> None:
         time.sleep(0.2)
 
 
-def confirm_pending_r18(uid: str, raw_msg: str, target_id: Any, is_group: bool) -> bool:
-    if uid not in pending_r18:
-        return False
-    if not any(word in raw_msg for word in ["确认", "要", "发", "可以", "同意"]):
-        return False
-    if is_group:
-        send_reply(target_id, "这类图片只私聊发。你私聊我回复“确认”就行。", True)
-        return True
-
-    item = pending_r18.pop(uid)
-    onebot.send_msg(uid, item["cq"], is_group=False)
-    history = get_img_history(uid)
-    history.add(item["key"])
-    save_img_history(uid, history)
-    return True
-
-
-def handle_image_request(uid: str, text: str, target_id: Any, is_group: bool) -> None:
-    result = fetch_pixiv_image(text, uid)
-    if not result:
-        send_reply(target_id, "没搜到合适的图，可能是关键词太偏或者图片接口抽风了。", is_group)
-        return
-
-    if result["is_r18"]:
-        pending_r18[uid] = {"cq": result["cq"], "key": result["key"]}
-        if is_group:
-            send_reply(target_id, "搜到了，但这类图片不在群里发。你私聊我回复“确认”。", True)
-        else:
-            send_reply(target_id, "搜到了，但需要你回复“确认”我再发。", False)
-        return
-
-    onebot.send_msg(target_id, result["cq"], is_group=is_group)
-    history = get_img_history(uid)
-    history.add(result["key"])
-    save_img_history(uid, history)
-
-
 def process_message(data: dict[str, Any]) -> None:
     uid = str(data.get("user_id", ""))
     raw_msg = str(data.get("raw_message", "")).strip()
@@ -623,9 +472,6 @@ def process_message(data: dict[str, Any]) -> None:
         mentioned, raw_msg = strip_bot_mention(raw_msg, self_id)
         if not mentioned:
             return
-
-    if confirm_pending_r18(uid, raw_msg, target_id, is_group):
-        return
 
     intent = detect_intent(raw_msg)
     action = intent.get("action", "chat")
@@ -645,9 +491,6 @@ def process_message(data: dict[str, Any]) -> None:
         if action == "weather":
             send_reply(target_id, weather_lookup(query, raw_msg), is_group)
             return
-        if action == "image_search":
-            handle_image_request(uid, query, target_id, is_group)
-            return
         if action == "web_search":
             search_info = web_search(query)
             reply = generate_reply(uid, raw_msg, f"网页搜索结果：\n{search_info}")
@@ -665,7 +508,7 @@ def process_message(data: dict[str, Any]) -> None:
 
 
 @app.route("/", methods=["POST"])
-def onebot_event() -> tuple[dict[str, str], int] | dict[str, str]:
+def onebot_event() -> dict[str, str]:
     data = request.get_json(silent=True) or {}
     if data.get("post_type") == "message":
         process_message(data)
@@ -680,7 +523,6 @@ def health() -> dict[str, Any]:
         "deepseek_configured": bool(config.deepseek_api_key),
         "onebot_url": config.onebot_url,
         "require_group_at": config.require_group_at,
-        "enable_r18": config.enable_r18,
     }
 
 

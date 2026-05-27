@@ -116,11 +116,15 @@ post_type == "message"
 Main flow:
 
 1. `onebot_event()` receives the JSON event.
-2. `process_message()` extracts user ID, raw message, group/private type, and target ID.
-3. If the message is from a group and `REQUIRE_GROUP_AT=true`, ATRI ignores it unless mentioned.
-4. `detect_intent()` decides the action.
-5. The selected handler runs.
-6. `send_reply()` sends one or more message chunks through `OneBotClient`.
+2. Duplicate OneBot message IDs are ignored.
+3. Valid messages are queued by conversation scope.
+4. A background worker drains each conversation queue in order, while different
+   conversations may still run in parallel.
+5. `process_message()` extracts user ID, raw message, group/private type, and target ID.
+6. If the message is from a group and `REQUIRE_GROUP_AT=true`, ATRI ignores it unless mentioned.
+7. `detect_intent()` decides the action.
+8. The selected handler runs.
+9. `send_reply()` sends one or more message chunks through `OneBotClient`.
 
 Supported actions:
 

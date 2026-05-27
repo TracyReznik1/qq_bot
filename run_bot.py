@@ -96,10 +96,14 @@ logger = logging.getLogger("qq-bot")
 
 chat_history: dict[str, list[dict[str, str]]] = {}
 chat_history_lock = Lock()
+memory_lock = Lock()
 message_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="qq-message")
 processed_message_ids: set[str] = set()
 processed_message_order: deque[str] = deque()
 processed_message_lock = Lock()
+session_queue_lock = Lock()
+session_message_queues: dict[str, deque[dict[str, Any]]] = {}
+active_session_workers: set[str] = set()
 MAX_PROCESSED_MESSAGE_IDS = 500
 
 
@@ -111,6 +115,36 @@ def build_session_key(uid: str, data: dict[str, Any], is_group: bool) -> str:
     if is_group:
         return f"group:{safe_id(data.get('group_id'))}:{safe_id(uid)}"
     return f"private:{safe_id(uid)}"
+
+
+def get_event_session_key(data: dict[str, Any]) -> str | None:
+    uid = str(data.get("user_id", ""))
+    raw_msg = str(data.get("raw_message", "")).strip()
+    if not uid or not raw_msg:
+        return None
+
+    is_group = data.get("message_type") == "group"
+    return build_session_key(uid, data, is_group)
+
+
+def build_message_dedupe_key(data: dict[str, Any], message_id: Any) -> str:
+    message_type = str(data.get("message_type") or "unknown")
+    if message_type == "group":
+        scope_kind = "group"
+        scope_id = data.get("group_id")
+    else:
+        scope_kind = "user"
+        scope_id = data.get("user_id")
+
+    return ":".join(
+        [
+            safe_id(data.get("self_id")),
+            safe_id(message_type),
+            scope_kind,
+            safe_id(scope_id),
+            safe_id(message_id),
+        ]
+    )
 
 
 def read_json(path: Path, default: Any) -> Any:
@@ -127,21 +161,27 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def get_user_memory(uid: str) -> dict[str, list[str]]:
+def _get_user_memory_unlocked(uid: str) -> dict[str, list[str]]:
     data = read_json(MEMORY_DIR / f"{safe_id(uid)}.json", {"facts": []})
     facts = data.get("facts", []) if isinstance(data, dict) else []
     facts = [str(item).strip() for item in facts if str(item).strip()]
     return {"facts": facts[-config.memory_limit :]}
 
 
+def get_user_memory(uid: str) -> dict[str, list[str]]:
+    with memory_lock:
+        return _get_user_memory_unlocked(uid)
+
+
 def add_user_memory(uid: str, fact: str) -> None:
     fact = fact.strip()
     if not fact:
         return
-    memory = get_user_memory(uid)
-    facts = [item for item in memory["facts"] if item != fact]
-    facts.append(fact)
-    write_json(MEMORY_DIR / f"{safe_id(uid)}.json", {"facts": facts[-config.memory_limit :]})
+    with memory_lock:
+        memory = _get_user_memory_unlocked(uid)
+        facts = [item for item in memory["facts"] if item != fact]
+        facts.append(fact)
+        write_json(MEMORY_DIR / f"{safe_id(uid)}.json", {"facts": facts[-config.memory_limit :]})
 
 
 class OneBotClient:
@@ -532,7 +572,7 @@ def mark_message_seen(data: dict[str, Any]) -> bool:
     if message_id is None:
         return True
 
-    key = f"{data.get('self_id', '')}:{message_id}"
+    key = build_message_dedupe_key(data, message_id)
     with processed_message_lock:
         if key in processed_message_ids:
             return False
@@ -552,11 +592,41 @@ def process_message_safely(data: dict[str, Any]) -> None:
         logger.exception("Background message processing failed")
 
 
+def drain_session_queue(session_key: str) -> None:
+    while True:
+        with session_queue_lock:
+            queue = session_message_queues.get(session_key)
+            if not queue:
+                session_message_queues.pop(session_key, None)
+                active_session_workers.discard(session_key)
+                return
+            data = queue.popleft()
+
+        process_message_safely(data)
+
+
+def enqueue_message(data: dict[str, Any]) -> None:
+    session_key = get_event_session_key(data)
+    if session_key is None:
+        return
+
+    should_start_worker = False
+    with session_queue_lock:
+        queue = session_message_queues.setdefault(session_key, deque())
+        queue.append(data)
+        if session_key not in active_session_workers:
+            active_session_workers.add(session_key)
+            should_start_worker = True
+
+    if should_start_worker:
+        message_executor.submit(drain_session_queue, session_key)
+
+
 @app.route("/", methods=["POST"])
 def onebot_event() -> dict[str, str]:
     data = request.get_json(silent=True) or {}
     if data.get("post_type") == "message" and mark_message_seen(data):
-        message_executor.submit(process_message_safely, data)
+        enqueue_message(data)
     return {"status": "ok"}
 
 

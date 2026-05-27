@@ -1,0 +1,95 @@
+from dataclasses import dataclass
+from typing import Callable
+
+from src.chat.memory import add_global_memory, add_personal_memory
+from src.config import config
+from src.router import Route
+
+from . import weather
+from .help import help_text
+from .image import image_disabled_text
+from .reset import reset_context
+from .search import search_reply
+
+
+@dataclass(frozen=True)
+class CommandContext:
+    uid: str
+    session_key: str
+    raw_message: str
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    handled: bool
+    reply: str = ""
+
+
+CommandHandler = Callable[[str, CommandContext], CommandResult]
+
+
+def _text_result(reply: str) -> CommandResult:
+    return CommandResult(handled=True, reply=reply)
+
+
+def _help_command(_query: str, _context: CommandContext) -> CommandResult:
+    return _text_result(help_text())
+
+
+def _image_command(_query: str, _context: CommandContext) -> CommandResult:
+    return _text_result(image_disabled_text())
+
+
+def _reset_command(_query: str, context: CommandContext) -> CommandResult:
+    return _text_result(reset_context(context.session_key))
+
+
+def _remember_command(query: str, context: CommandContext) -> CommandResult:
+    memory = query or context.raw_message
+    add_personal_memory(context.uid, memory)
+    return _text_result("记住了。")
+
+
+def _global_remember_command(query: str, context: CommandContext) -> CommandResult:
+    if str(context.uid) not in config.admin_qq_ids:
+        return _text_result("全局记忆只能由管理员写入。")
+
+    memory = query.strip()
+    if not memory:
+        return _text_result("想让我全局记住什么？比如：/globalremember 大家都喜欢热茶")
+    add_global_memory(memory)
+    return _text_result("全局记忆已保存。")
+
+
+def _weather_command(query: str, context: CommandContext) -> CommandResult:
+    return _text_result(weather.weather_lookup(query, context.raw_message))
+
+
+def _search_command(query: str, context: CommandContext) -> CommandResult:
+    return _text_result(search_reply(query, context.session_key, context.raw_message))
+
+
+COMMANDS: dict[str, CommandHandler] = {
+    "help": _help_command,
+    "h": _help_command,
+    "search": _search_command,
+    "s": _search_command,
+    "weather": _weather_command,
+    "w": _weather_command,
+    "remember": _remember_command,
+    "memo": _remember_command,
+    "globalremember": _global_remember_command,
+    "gremember": _global_remember_command,
+    "image": _image_command,
+    "img": _image_command,
+    "reset": _reset_command,
+}
+
+
+def handle_command(route: Route, context: CommandContext) -> CommandResult:
+    command_handler = COMMANDS.get(route.command)
+    if command_handler is None:
+        command_text = f"/{route.command}" if route.command else "/"
+        return _text_result(f"暂不支持这个命令：{command_text}。可以试试 /help、/search 或 /weather。")
+
+    return command_handler(route.query, context)

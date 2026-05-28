@@ -3,7 +3,11 @@ from src.services.search_service import has_search_results, search
 
 
 def search_reply(query: str, session_key: str, raw_message: str) -> str:
-    search_result = search(query or raw_message)
+    query = query.strip()
+    if not query:
+        return "想搜什么？比如：/search DeepSeek 最新消息"
+
+    search_result = search(query)
     if not has_search_results(search_result):
         tool_context = (
             "这是 /search 命令的搜索失败结果。请按 ATRI 的角色设定回答用户："

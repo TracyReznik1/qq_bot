@@ -26,6 +26,9 @@ class SearchResultStatusTests(unittest.TestCase):
         self.assertTrue(search_service.has_search_results(success_with_failure_words))
         self.assertFalse(search_service.has_search_results(failure_with_changed_text))
 
+    def test_search_service_does_not_keep_reliable_search_gate(self) -> None:
+        self.assertFalse(hasattr(search_service, "requires_reliable_search_result"))
+
 
 class DeepSeekClientToolCallResponseTests(unittest.TestCase):
     def test_chat_returns_structured_tool_calls(self) -> None:
@@ -121,6 +124,26 @@ class SearchCommandBehaviorTests(unittest.TestCase):
         self.assertIn("/search", self.reply_calls[0][2])
         self.assertIn("不知道", self.reply_calls[0][2])
         self.assertIn("不要猜测", self.reply_calls[0][2])
+
+    def test_search_command_without_query_asks_for_query_without_searching(self) -> None:
+        search_calls = []
+
+        def fake_search(query):
+            search_calls.append(query)
+            return search_service.SearchResult(ok=True, status="success", text="不应该搜索")
+
+        def fake_generate_reply(session_key, raw_message, tool_context):
+            self.reply_calls.append((session_key, raw_message, tool_context))
+            return "不应该调用模型"
+
+        search_command.search = fake_search
+        search_command.generate_reply = fake_generate_reply
+
+        reply = search_command.search_reply("", "private:123", "/search")
+
+        self.assertEqual(reply, "想搜什么？比如：/search DeepSeek 最新消息")
+        self.assertEqual(search_calls, [])
+        self.assertEqual(self.reply_calls, [])
 
 
 class ChatSearchToolLoopFailureTests(unittest.TestCase):

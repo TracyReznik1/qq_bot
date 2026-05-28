@@ -1,6 +1,9 @@
 import ast
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -49,9 +52,77 @@ class MainImportBoundaryTests(unittest.TestCase):
             "DeepSeekClient",
             "read_json",
             "write_json",
+            "chat_history",
         }
 
         self.assertFalse(imported_names & stale_names, imported_names & stale_names)
+
+    def test_root_router_compatibility_shim_has_been_removed(self) -> None:
+        root_router_path = Path(__file__).resolve().parent / "router.py"
+
+        self.assertFalse(root_router_path.exists())
+
+    def test_import_run_bot_does_not_migrate_legacy_memory_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "atri_data"
+            memory_dir = data_dir / "memories"
+            memory_dir.mkdir(parents=True)
+            legacy_file = memory_dir / "123.json"
+            legacy_file.write_text(json.dumps({"facts": ["旧记忆"]}, ensure_ascii=False), encoding="utf-8")
+
+            env = os.environ.copy()
+            env["DATA_DIR"] = str(data_dir)
+            result = subprocess.run(
+                [sys.executable, "-c", "import run_bot"],
+                cwd=Path(__file__).resolve().parent,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(legacy_file.exists())
+            self.assertFalse((memory_dir / "user_123.json").exists())
+            self.assertFalse((data_dir / "legacy_memories" / "123.json").exists())
+
+    def test_startup_runs_legacy_memory_migration_once(self) -> None:
+        self.assertTrue(hasattr(run_bot, "startup"))
+        calls = []
+        original_migrate = run_bot.migrate_legacy_memory_files
+        original_initialized = getattr(run_bot, "_startup_initialized", None)
+        try:
+            run_bot.migrate_legacy_memory_files = lambda: calls.append("migrate")
+            run_bot._startup_initialized = False
+
+            run_bot.startup()
+            run_bot.startup()
+        finally:
+            run_bot.migrate_legacy_memory_files = original_migrate
+            if original_initialized is None and hasattr(run_bot, "_startup_initialized"):
+                delattr(run_bot, "_startup_initialized")
+            else:
+                run_bot._startup_initialized = original_initialized
+
+        self.assertEqual(calls, ["migrate"])
+
+    def test_run_invokes_startup_before_flask_app(self) -> None:
+        calls = []
+        original_startup = run_bot.startup
+        original_app_run = run_bot.app.run
+        original_logger_info = run_bot.logger.info
+        try:
+            run_bot.startup = lambda: calls.append("startup")
+            run_bot.app.run = lambda *_args, **_kwargs: calls.append("app.run")
+            run_bot.logger.info = lambda *_args, **_kwargs: None
+
+            run_bot.run()
+        finally:
+            run_bot.startup = original_startup
+            run_bot.app.run = original_app_run
+            run_bot.logger.info = original_logger_info
+
+        self.assertEqual(calls, ["startup", "app.run"])
 
 
 class PromptSafetyTests(unittest.TestCase):
@@ -87,12 +158,12 @@ class PromptSafetyTests(unittest.TestCase):
         self.assertIn("当前会话记忆：喜欢简洁回答", prompt)
         self.assertIn("外部信息：搜索结果：ATRI", prompt)
 
-    def test_system_prompt_keeps_search_permission_code_gated(self) -> None:
+    def test_system_prompt_requires_search_for_unfamiliar_chat_terms(self) -> None:
         prompt = build_system_prompt("private:search-rule")
 
-        for marker in ["代码层", "能不搜索就不搜索", "search_web"]:
+        for marker in ["不懂", "新梗", "黑话", "缩写", "必须先调用 search_web"]:
             self.assertIn(marker, prompt)
-        self.assertIn("默认像真人一样先正常聊天", prompt)
+        self.assertIn("搜索结果只能作为参考", prompt)
         self.assertIn("不要直接生硬地说不知道", prompt)
 
     def test_system_prompt_includes_configured_bot_persona(self) -> None:
@@ -128,10 +199,15 @@ class ChatToolBoundaryTests(unittest.TestCase):
     def test_search_tool_description_mentions_unfamiliar_slang_and_abbreviations(self) -> None:
         description = chat_service.SEARCH_WEB_TOOL["function"]["description"]
 
-        for marker in ["冷门知识", "专有名词", "圈内昵称", "梗"]:
+        for marker in ["不懂", "新梗", "黑话", "缩写", "必须搜索"]:
             self.assertIn(marker, description)
 
-    def test_plain_chat_does_not_expose_search_tool(self) -> None:
+    def test_chat_service_does_not_keep_code_level_search_intent_gate(self) -> None:
+        self.assertFalse(hasattr(chat_service, "should_allow_auto_search"))
+        self.assertFalse(hasattr(chat_service, "is_weather_chat"))
+        self.assertFalse(hasattr(chat_service, "is_image_chat"))
+
+    def test_plain_chat_exposes_only_search_tool_and_can_answer_directly(self) -> None:
         chat_calls = []
 
         def fake_chat(messages, **kwargs):
@@ -144,24 +220,24 @@ class ChatToolBoundaryTests(unittest.TestCase):
 
         self.assertEqual(reply, "嗯嗯，在的。")
         self.assertEqual(len(chat_calls), 1)
-        self.assertNotIn("tools", chat_calls[0][1])
-        self.assertNotIn("tool_choice", chat_calls[0][1])
+        self.assertEqual(chat_calls[0][1].get("tools"), [chat_service.SEARCH_WEB_TOOL])
+        self.assertEqual(chat_calls[0][1].get("tool_choice"), "auto")
 
-    def test_weather_chat_does_not_expose_search_tool(self) -> None:
+    def test_weather_like_chat_is_still_ordinary_chat_with_only_search_tool(self) -> None:
         chat_calls = []
 
         def fake_chat(messages, **kwargs):
             chat_calls.append((messages, kwargs))
-            return ChatResponse(content="听起来有点冷，准确天气可以用 /weather 北京 查。")
+            return ChatResponse(content="听起来有点冷，抱抱。")
 
         chat_service.deepseek.chat = fake_chat
 
         reply = chat_service.generate_reply("private:weather-chat", "今天北京天气怎么样")
 
-        self.assertIn("/weather", reply)
+        self.assertEqual(reply, "听起来有点冷，抱抱。")
         self.assertEqual(len(chat_calls), 1)
-        self.assertNotIn("tools", chat_calls[0][1])
-        self.assertNotIn("tool_choice", chat_calls[0][1])
+        self.assertEqual(chat_calls[0][1].get("tools"), [chat_service.SEARCH_WEB_TOOL])
+        self.assertEqual(chat_calls[0][1].get("tool_choice"), "auto")
 
     def test_unfamiliar_name_chat_exposes_search_tool(self) -> None:
         chat_calls = []
@@ -271,14 +347,14 @@ class ResetCommandTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         run_bot.send_reply = self.original_send_reply
-        run_bot.chat_history.clear()
+        chat_service.chat_history.clear()
         memory_store.MEMORY_DIR = self.original_memory_dir
         self.temp_memory_dir.cleanup()
 
     def test_reset_clears_only_current_session_history(self) -> None:
-        run_bot.chat_history["private:123"] = [{"role": "user", "content": "旧上下文"}]
-        run_bot.chat_history["group:999:123"] = [{"role": "user", "content": "群上下文"}]
-        run_bot.chat_history["private:456"] = [{"role": "user", "content": "别人的上下文"}]
+        chat_service.chat_history["private:123"] = [{"role": "user", "content": "旧上下文"}]
+        chat_service.chat_history["group:999:123"] = [{"role": "user", "content": "群上下文"}]
+        chat_service.chat_history["private:456"] = [{"role": "user", "content": "别人的上下文"}]
         run_bot.send_reply = lambda _target_id, text, _is_group: self.sent_messages.append(text)
 
         run_bot.process_message(
@@ -290,9 +366,9 @@ class ResetCommandTests(unittest.TestCase):
             }
         )
 
-        self.assertNotIn("private:123", run_bot.chat_history)
-        self.assertIn("group:999:123", run_bot.chat_history)
-        self.assertIn("private:456", run_bot.chat_history)
+        self.assertNotIn("private:123", chat_service.chat_history)
+        self.assertIn("group:999:123", chat_service.chat_history)
+        self.assertIn("private:456", chat_service.chat_history)
         self.assertEqual(self.sent_messages, ["当前会话上下文已清空。"])
 
     def test_reset_keeps_personal_memory_and_clears_current_session_memory(self) -> None:
@@ -331,7 +407,7 @@ class GlobalMemoryCommandTests(unittest.TestCase):
     def tearDown(self) -> None:
         run_bot.send_reply = self.original_send_reply
         command_module.config = self.original_command_config
-        run_bot.chat_history.clear()
+        chat_service.chat_history.clear()
         memory_store.MEMORY_DIR = self.original_memory_dir
         self.temp_memory_dir.cleanup()
 
@@ -381,6 +457,19 @@ class GlobalMemoryCommandTests(unittest.TestCase):
         self.assertEqual(self.sent_messages, ["记住了。"])
         self.assertIn("个人基础信息：我喜欢简洁回答", private_prompt)
         self.assertIn("个人基础信息：我喜欢简洁回答", group_prompt)
+
+    def test_remember_command_without_query_asks_for_content_and_does_not_write_memory(self) -> None:
+        run_bot.process_message(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 123,
+                "raw_message": "/remember",
+            }
+        )
+
+        self.assertEqual(self.sent_messages, ["想让我记住什么？比如：/remember 我喜欢简洁回答"])
+        self.assertEqual(memory_store.get_personal_memory("123"), {"facts": []})
 
     def test_global_memory_is_visible_to_every_user_prompt(self) -> None:
         memory_store.add_global_memory("全员默认说中文")

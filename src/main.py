@@ -9,7 +9,7 @@ from typing import Any
 import requests
 from flask import Flask, request
 
-from src.chat.chat_service import chat_history, generate_reply
+from src.chat.chat_service import generate_reply
 from src.chat.memory import migrate_legacy_memory_files
 from src.commands import CommandContext, handle_command
 from src.config import Config, config
@@ -30,8 +30,16 @@ session_queue_lock = Lock()
 session_message_queues: dict[str, deque[dict[str, Any]]] = {}
 active_session_workers: set[str] = set()
 MAX_PROCESSED_MESSAGE_IDS = 500
+_startup_initialized = False
 
-migrate_legacy_memory_files()
+
+def startup() -> None:
+    global _startup_initialized
+    if _startup_initialized:
+        return
+
+    migrate_legacy_memory_files()
+    _startup_initialized = True
 
 
 def build_session_key(uid: str, data: dict[str, Any], is_group: bool) -> str:
@@ -265,6 +273,7 @@ def health() -> dict[str, Any]:
 
 
 def run() -> None:
+    startup()
     logger.info("Starting %s on %s:%s", config.bot_name, config.host, config.port)
     app.run(host=config.host, port=config.port)
 

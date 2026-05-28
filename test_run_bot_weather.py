@@ -1,20 +1,20 @@
 import unittest
 
-import router
 import run_bot
 import src.commands as commands
 from src.commands import weather
+from src.router import route_message
 
 
 class WeatherIntentTests(unittest.TestCase):
     def test_plain_weather_text_uses_chat_route(self) -> None:
-        route = router.route_message("北京天气")
+        route = route_message("北京天气")
 
         self.assertEqual(route.handler, "chat")
         self.assertEqual(route.action, "chat")
 
     def test_weather_command_uses_weather_route(self) -> None:
-        route = router.route_message("/weather 北京")
+        route = route_message("/weather 北京")
 
         self.assertEqual(route.handler, "command")
         self.assertEqual(route.action, "command")
@@ -30,7 +30,7 @@ class WeatherIntentTests(unittest.TestCase):
             weather.weather_lookup = lambda query, original_text: f"{query}|{original_text}"
 
             result = commands.handle_command(
-                router.route_message("/weather 北京"),
+                route_message("/weather 北京"),
                 commands.CommandContext(uid="123", session_key="private:123", raw_message="/weather 北京"),
             )
 

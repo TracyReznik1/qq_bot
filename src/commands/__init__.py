@@ -45,7 +45,10 @@ def _reset_command(_query: str, context: CommandContext) -> CommandResult:
 
 
 def _remember_command(query: str, context: CommandContext) -> CommandResult:
-    memory = query or context.raw_message
+    memory = query.strip()
+    if not memory:
+        return _text_result("想让我记住什么？比如：/remember 我喜欢简洁回答")
+
     add_personal_memory(context.uid, memory)
     return _text_result("记住了。")
 

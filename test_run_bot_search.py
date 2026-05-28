@@ -234,6 +234,27 @@ class ChatSearchToolLoopFailureTests(unittest.TestCase):
         self.assertEqual(searched_queries, [])
         self.assertEqual(len(self.chat_calls), 1)
 
+    def test_tool_context_prompt_does_not_ask_model_to_call_search_again(self) -> None:
+        def fake_chat(messages, **kwargs):
+            self.chat_calls.append((messages, kwargs))
+            return deepseek_client.ChatResponse(content="根据 /search 结果整理好了。")
+
+        chat_service.deepseek.chat = fake_chat
+
+        reply = chat_service.generate_reply(
+            "private:command-search",
+            "/search smoggy是谁",
+            "网页搜索结果：\n1. smoggy 资料\n摘要：示例资料",
+        )
+
+        system_prompt = self.chat_calls[0][0][0]["content"]
+        self.assertEqual(reply, "根据 /search 结果整理好了。")
+        self.assertNotIn("tools", self.chat_calls[0][1])
+        self.assertNotIn("tool_choice", self.chat_calls[0][1])
+        self.assertIn("外部搜索已经完成", system_prompt)
+        self.assertIn("不要再调用 search_web", system_prompt)
+        self.assertNotIn("必须先调用 search_web", system_prompt)
+
     def test_tool_call_round_limit_runs_final_summary_without_tools(self) -> None:
         tool_calls = [
             {

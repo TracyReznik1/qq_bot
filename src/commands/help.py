@@ -8,6 +8,7 @@ def help_text() -> str:
         "你好\n"
         "kskbl 是什么意思\n"
         "/search DeepSeek 最新消息\n"
+        "/bsearch 大东彦\n"
         "/weather 北京\n"
         "/remember 我喜欢简洁回答\n"
         "/globalremember 所有人都知道的设定（管理员）\n"

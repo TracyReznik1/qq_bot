@@ -1,17 +1,28 @@
 import json
+import logging
 import re
+from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from src.chat.prompt import build_system_prompt
-from src.chat.search_tool import search_web
+from src.chat.prompt import build_system_prompt, build_untrusted_context
+from src.services.bilibili_search import (
+    bilibili_user_search,
+    has_bilibili_search_signal,
+)
+from src.services.search_service import web_search as search_web
 from src.config import config
 from src.services.deepseek_client import ChatResponse, DeepSeekClient
+from src.utils.storage import read_json, safe_id, write_json
 
+
+logger = logging.getLogger("qq-bot")
 
 deepseek = DeepSeekClient(config)
 chat_history: dict[str, list[dict[str, str]]] = {}
 chat_history_lock = Lock()
+HISTORY_DIR = config.data_dir / "history"
+HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 MAX_TOOL_CALL_ROUNDS = 2
 TOOL_CALL_LIMIT_FALLBACK = "我搜到了信息，但没能整理出可靠回答。可以换个问法再试一次。"
 
@@ -25,7 +36,12 @@ SEARCH_WEB_TOOL = {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The search query to look up.",
+                    "description": (
+                        "搜索关键词，从用户最新消息中提取。"
+                        "规则：提取核心名词、专有名词、事件名、作品名、人名、梗/黑话，用空格分隔；"
+                        "去掉语气词、追问、闲聊成分和已在前文解释过的上下文；"
+                        "不要用完整问句，不要带\"怎么\"、\"什么\"、\"为什么\"。"
+                    ),
                 }
             },
             "required": ["query"],
@@ -33,14 +49,54 @@ SEARCH_WEB_TOOL = {
     },
 }
 
+BILIBILI_USER_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "bilibili_user_search",
+        "description": "搜索 B站公开用户、UP主、主播资料。仅在用户明确提到 B站、bilibili、UP主、主播或直播间时使用。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "B站用户、UP主或主播关键词，去掉'B站'、'UP主'、'是谁'等口语成分。",
+                }
+            },
+            "required": ["query"],
+        },
+    },
+}
 
-def filter_search_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    search_calls = []
+SUPPORTED_TOOL_NAMES = {"search_web", "bilibili_user_search"}
+
+
+def chat_tools_for_text(text: str) -> list[dict[str, Any]]:
+    tools = [SEARCH_WEB_TOOL]
+    if has_bilibili_search_signal(text):
+        tools.append(BILIBILI_USER_SEARCH_TOOL)
+    return tools
+
+
+def tool_function_name(tool_call: dict[str, Any]) -> str:
+    function = tool_call.get("function") if isinstance(tool_call, dict) else None
+    if not isinstance(function, dict):
+        return ""
+    return str(function.get("name") or "")
+
+
+def filter_tool_calls(tool_calls: list[dict[str, Any]], allowed_names: set[str]) -> list[dict[str, Any]]:
+    supported_calls = []
     for tool_call in tool_calls:
-        function = tool_call.get("function") if isinstance(tool_call, dict) else None
-        if isinstance(function, dict) and function.get("name") == "search_web":
-            search_calls.append(tool_call)
-    return search_calls
+        name = tool_function_name(tool_call)
+        if name in allowed_names and name in SUPPORTED_TOOL_NAMES:
+            supported_calls.append(tool_call)
+    return supported_calls
+
+
+def run_tool(name: str, query: str) -> str:
+    if name == "bilibili_user_search":
+        return bilibili_user_search(query)
+    return search_web(query)
 
 
 def normalize_chat_response(response: ChatResponse | str) -> ChatResponse:
@@ -61,21 +117,49 @@ def tool_call_query(tool_call: dict[str, Any], fallback: str) -> str:
     return str(args.get("query") or fallback).strip()
 
 
-def build_search_tool_messages(tool_calls: list[dict[str, Any]], fallback_query: str) -> list[dict[str, Any]]:
+def build_tool_messages(tool_calls: list[dict[str, Any]], fallback_query: str) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = [
         {"role": "assistant", "content": None, "tool_calls": tool_calls}
     ]
     for index, tool_call in enumerate(tool_calls, 1):
+        name = tool_function_name(tool_call)
         query = tool_call_query(tool_call, fallback_query)
         messages.append(
             {
                 "role": "tool",
-                "tool_call_id": str(tool_call.get("id") or f"search_web_{index}"),
-                "name": "search_web",
-                "content": search_web(query),
+                "tool_call_id": str(tool_call.get("id") or f"{name}_{index}"),
+                "name": name,
+                "content": run_tool(name, query),
             }
         )
     return messages
+
+
+def _history_path(session_key: str) -> Path:
+    return HISTORY_DIR / f"{safe_id(session_key)}.json"
+
+
+def _load_history_unlocked(session_key: str) -> list[dict[str, str]]:
+    if not config.persist_history:
+        return []
+    data = read_json(_history_path(session_key), {"messages": []})
+    messages = data.get("messages", []) if isinstance(data, dict) else []
+    limit = max(config.history_turns, 1) * 2
+    return [msg for msg in messages[-limit:] if isinstance(msg, dict) and "role" in msg and "content" in msg]
+
+
+def _save_history_unlocked(session_key: str, history: list[dict[str, str]]) -> None:
+    if not config.persist_history:
+        return
+    write_json(_history_path(session_key), {"messages": history})
+
+
+def _remove_history_file(session_key: str) -> None:
+    path = _history_path(session_key)
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        logger.debug("Failed to remove history file: %s", path)
 
 
 def append_history(session_key: str, user_text: str, assistant_text: str) -> None:
@@ -87,16 +171,31 @@ def append_history(session_key: str, user_text: str, assistant_text: str) -> Non
                 {"role": "assistant", "content": assistant_text},
             ]
         )
-        chat_history[session_key] = history[-max(config.history_turns, 1) * 2 :]
+        limit = max(config.history_turns, 1) * 2
+        history[:] = history[-limit:]
+        _save_history_unlocked(session_key, history)
 
 
 def reset_history(session_key: str) -> None:
     with chat_history_lock:
         chat_history.pop(session_key, None)
+    _remove_history_file(session_key)
+
+
+def _ensure_history_loaded(session_key: str) -> None:
+    with chat_history_lock:
+        history = chat_history.setdefault(session_key, [])
+        if not history and config.persist_history:
+            loaded = _load_history_unlocked(session_key)
+            history.extend(loaded)
 
 
 def generate_reply(session_key: str, text: str, tool_context: str = "") -> str:
-    messages: list[dict[str, Any]] = [{"role": "system", "content": build_system_prompt(session_key, tool_context)}]
+    _ensure_history_loaded(session_key)
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": build_system_prompt(session_key, tool_context)},
+        {"role": "user", "content": build_untrusted_context(session_key, tool_context)},
+    ]
     with chat_history_lock:
         messages.extend(chat_history.get(session_key, []).copy())
     messages.append({"role": "user", "content": text})
@@ -106,21 +205,27 @@ def generate_reply(session_key: str, text: str, tool_context: str = "") -> str:
     else:
         reply = ""
         needs_final_summary = False
+        tools = chat_tools_for_text(text)
+        allowed_tool_names = {
+            str(tool.get("function", {}).get("name") or "")
+            for tool in tools
+            if isinstance(tool.get("function"), dict)
+        }
         for _round in range(MAX_TOOL_CALL_ROUNDS):
             response = normalize_chat_response(
                 deepseek.chat(
                     messages,
                     temperature=0.75,
-                    tools=[SEARCH_WEB_TOOL],
+                    tools=tools,
                     tool_choice="auto",
                 )
             )
             reply = response.content
-            tool_calls = filter_search_tool_calls(response.tool_calls)
+            tool_calls = filter_tool_calls(response.tool_calls, allowed_tool_names)
             if not tool_calls:
                 needs_final_summary = False
                 break
-            messages.extend(build_search_tool_messages(tool_calls, text))
+            messages.extend(build_tool_messages(tool_calls, text))
             needs_final_summary = True
 
         if needs_final_summary:

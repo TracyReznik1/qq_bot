@@ -6,9 +6,10 @@
 
 - 私聊和群聊对话
 - 群聊默认需要 @ ATRI 才响应
-- 普通聊天始终只给模型 `search_web` 这一个工具；闲聊可直接回答，遇到不懂的新梗、黑话、缩写、圈内 ID 等必须先搜索
+- 普通聊天默认只给模型 `search_web`；检测到 B站、bilibili、UP主、主播等语境时，才额外提供 `bilibili_user_search`
 - 普通聊天遇到最新信息、实时信息、冷门知识、专有名词、圈内昵称或梗时可以联网搜索；搜不到时会按 ATRI 的性格带着不确定性继续回答
-- `/search` 搜索成功时会结合模型整理回答；搜索失败时会按 ATRI 的性格说明不知道或无法确认
+- `/search` 搜索成功时会结合模型整理回答
+- `/bsearch` 查询 B站公开用户、UP主、主播资料
 - `/weather` 命令查询今天、明天、后天天气；普通聊天不会自动查天气
 - `/reset` 只清空当前会话上下文
 - `/remember` 保存跨私聊和群聊生效的个人基础信息
@@ -68,6 +69,7 @@ http://127.0.0.1:5000/health
 你好
 kskbl 是什么意思
 /search DeepSeek 最新消息
+/bsearch 大东彦
 /weather 北京
 /remember 我喜欢简洁回答
 /globalremember 所有人都知道的设定
@@ -82,8 +84,8 @@ kskbl 是什么意思
 - `run_bot.py`：兼容启动入口
 - `src/main.py`：机器人主程序和 Flask 回调
 - `src/router.py`：区分 `/` 命令和默认聊天
-- `src/chat/`：普通聊天、提示词、记忆、聊天可用的 `search_web`
-- `src/commands/`：命令功能，例如 `/weather`
+- `src/chat/`：普通聊天、提示词、记忆、聊天可用的 `search_web` 和条件暴露的 `bilibili_user_search`
+- `src/commands/`：命令功能，例如 `/weather`、`/bsearch`
 - `src/services/`：DeepSeek 和搜索服务客户端
 - `test_deepseek.py`：DeepSeek 连通性测试
 - `.env.example`：配置模板

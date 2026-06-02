@@ -1,9 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-import requests
-
 from src.config import Config
+from src.util import try_proxied_post
 
 
 @dataclass(frozen=True)
@@ -39,14 +38,14 @@ class DeepSeekClient:
         if tool_choice:
             payload["tool_choice"] = tool_choice
 
-        response = requests.post(
+        response = try_proxied_post(
             self.cfg.deepseek_url,
+            proxies=self.cfg.proxies,
             json=payload,
             headers={
                 "Authorization": f"Bearer {self.cfg.deepseek_api_key}",
                 "Content-Type": "application/json",
             },
-            proxies=self.cfg.proxies,
             timeout=self.cfg.request_timeout,
         )
         response.raise_for_status()

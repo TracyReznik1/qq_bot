@@ -59,6 +59,7 @@ class Config:
     onebot_access_token: str = os.getenv("ONEBOT_ACCESS_TOKEN", "")
     callback_secret: str = os.getenv("CALLBACK_SECRET", "")
     proxy_url: str = os.getenv("PROXY_URL", "")
+    tavily_api_key: str = os.getenv("TAVILY_API_KEY", "")
     host: str = os.getenv("BOT_HOST", "127.0.0.1").strip() or "127.0.0.1"
     port: int = env_int("BOT_PORT", 5000)
     require_group_at: bool = env_bool("REQUIRE_GROUP_AT", True)
@@ -67,6 +68,7 @@ class Config:
     search_max_results: int = env_int("SEARCH_MAX_RESULTS", 4)
     history_turns: int = env_int("HISTORY_TURNS", 8)
     memory_limit: int = env_int("MEMORY_LIMIT", 30)
+    persist_history: bool = env_bool("PERSIST_HISTORY", True)
     request_timeout: float = env_float("REQUEST_TIMEOUT", 18.0)
     max_reply_chars: int = env_int("MAX_REPLY_CHARS", 1700)
 

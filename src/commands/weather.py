@@ -1,15 +1,69 @@
+import json
 import logging
 import re
 from typing import Any
 from urllib.parse import quote
 
-import requests
-
 from src.config import config
+from src.services.deepseek_client import DeepSeekClient
 from src.services.search_service import web_search
+from src.util import try_proxied_get
 
 
 logger = logging.getLogger("qq-bot")
+
+deepseek = DeepSeekClient(config)
+
+WEATHER_EXTRACT_PROMPT = (
+    "从用户输入中提取天气查询的城市和日期偏移量。严格按照 JSON 返回。\n"
+    "\n"
+    "字段规则：\n"
+    "- city: 要查询的城市名，必须是标准中文名称（如\"北京\"、\"东京\"、\"纽约\"）。如果用户用了别名（如\"魔都\"→\"上海\"），请转为标准名。\n"
+    "- day_offset: 整数，0=今天, 1=明天, 2=后天, 3=大后天, -1=周末/下周等超出范围\n"
+    "- unsupported_reason: 如果 day_offset=-1，简要说明不支持的原因（如\"周末\"）；否则留空\n"
+    "\n"
+    "判断规则：\n"
+    "1. 没指定城市 → city=\"\"\n"
+    "2. 没指定日期 → day_offset=0\n"
+    "3. \"大后天\" → day_offset=3\n"
+    "4. \"周末\"、\"下周\"、\"未来几天\"等 → day_offset=-1\n"
+    "5. 多个城市 → 只取第一个\n"
+    "6. \"会不会下雨\"、\"热不热\"等属于对天气的询问，不影响 city 提取\n"
+    "\n"
+    "只返回 JSON，不要其他内容。\n"
+    '格式示例：{"city": "北京", "day_offset": 1, "unsupported_reason": ""}'
+)
+
+
+def llm_extract_weather_params(text: str) -> dict[str, Any] | None:
+    """用 LLM 从自然语言中提取城市和日期偏移量。失败返回 None。"""
+    try:
+        response = deepseek.chat(
+            messages=[
+                {"role": "system", "content": WEATHER_EXTRACT_PROMPT},
+                {"role": "user", "content": text},
+            ],
+            temperature=0,
+        )
+        content = response.content.strip()
+        if content.startswith("```"):
+            lines = content.split("\n")
+            content = "\n".join(lines[1:])
+            if content.endswith("```"):
+                content = content[:-3]
+        content = content.strip()
+        result = json.loads(content)
+        city = str(result.get("city", "")).strip()
+        day_offset = int(result.get("day_offset", 0))
+        unsupported_reason = str(result.get("unsupported_reason", "")).strip()
+        return {
+            "city": city,
+            "day_offset": day_offset,
+            "unsupported_reason": unsupported_reason,
+        }
+    except Exception:
+        logger.debug("LLM weather extraction failed, falling back to rules")
+        return None
 
 
 def remove_command_words(text: str, words: list[str]) -> str:
@@ -96,7 +150,7 @@ def format_location_name(location: dict[str, Any]) -> str:
 
 
 def open_meteo_weather_lookup(city: str, day_offset: int = 0) -> str:
-    geo_response = requests.get(
+    geo_response = try_proxied_get(
         "https://geocoding-api.open-meteo.com/v1/search",
         params={"name": city, "count": 1, "language": "zh", "format": "json"},
         proxies=config.proxies,
@@ -112,7 +166,7 @@ def open_meteo_weather_lookup(city: str, day_offset: int = 0) -> str:
     location = locations[0]
     latitude = location["latitude"]
     longitude = location["longitude"]
-    forecast_response = requests.get(
+    forecast_response = try_proxied_get(
         "https://api.open-meteo.com/v1/forecast",
         params={
             "latitude": latitude,
@@ -155,7 +209,7 @@ def open_meteo_weather_lookup(city: str, day_offset: int = 0) -> str:
 
 def wttr_weather_lookup(city: str, day_offset: int = 0) -> str:
     url = f"https://wttr.in/{quote(city)}?format=j1&lang=zh"
-    response = requests.get(
+    response = try_proxied_get(
         url,
         proxies=config.proxies,
         timeout=config.request_timeout,
@@ -191,6 +245,23 @@ def wttr_weather_lookup(city: str, day_offset: int = 0) -> str:
 def weather_lookup(city: str, original_text: str) -> str:
     request_text = city or original_text
     full_request_text = f"{city} {original_text}"
+
+    # 第一层：LLM 提取城市和日期
+    params = llm_extract_weather_params(request_text)
+    if params:
+        city = params["city"]
+        day_offset = params["day_offset"]
+
+        if day_offset == -1:
+            reason = params.get("unsupported_reason") or "这个日期"
+            return f"我现在支持查今天、明天、后天（和大后天）的天气。{reason}暂时查不了。"
+
+        if not city:
+            return "想查哪里的天气？比如：/weather 北京。"
+
+        return _call_weather_api(city, day_offset)
+
+    # 第二层：规则兜底（LLM 不可用时）
     if is_generic_future_weather_request(full_request_text):
         return "我现在支持查今天、明天、后天的天气。你可以这样问：明天北京天气。"
 
@@ -199,6 +270,11 @@ def weather_lookup(city: str, original_text: str) -> str:
     if not city:
         return "想查哪里的天气？比如：北京天气。"
 
+    return _call_weather_api(city, day_offset)
+
+
+def _call_weather_api(city: str, day_offset: int) -> str:
+    """三级降级：Open-Meteo → wttr.in → 网页搜索。"""
     try:
         return open_meteo_weather_lookup(city, day_offset)
     except Exception:

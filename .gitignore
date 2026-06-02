@@ -2,6 +2,8 @@
 __pycache__/
 *.pyc
 .idea/
+.claude/
+.codex_tmp/
 data_tmp/
 ddy_data/
 atri_data/

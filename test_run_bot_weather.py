@@ -45,11 +45,13 @@ class WeatherDateTests(unittest.TestCase):
         self.original_open_meteo = weather.open_meteo_weather_lookup
         self.original_wttr = weather.wttr_weather_lookup
         self.original_web_search = weather.web_search
+        self.original_llm_extract = weather.llm_extract_weather_params
 
     def tearDown(self) -> None:
         weather.open_meteo_weather_lookup = self.original_open_meteo
         weather.wttr_weather_lookup = self.original_wttr
         weather.web_search = self.original_web_search
+        weather.llm_extract_weather_params = self.original_llm_extract
 
     def test_tomorrow_weather_uses_tomorrow_forecast(self) -> None:
         calls: list[tuple[str, int]] = []
@@ -58,6 +60,7 @@ class WeatherDateTests(unittest.TestCase):
             calls.append((city, day_offset))
             return f"{city}:{day_offset}"
 
+        weather.llm_extract_weather_params = lambda _text: None
         weather.open_meteo_weather_lookup = fake_open_meteo
 
         result = weather.weather_lookup("明天北京", "明天北京天气")
@@ -66,6 +69,7 @@ class WeatherDateTests(unittest.TestCase):
         self.assertEqual(calls, [("北京", 1)])
 
     def test_generic_future_weather_asks_for_supported_day(self) -> None:
+        weather.llm_extract_weather_params = lambda _text: None
         weather.open_meteo_weather_lookup = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("no weather"))
         weather.wttr_weather_lookup = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("no weather"))
         weather.web_search = lambda _query: "搜索兜底"
@@ -73,6 +77,51 @@ class WeatherDateTests(unittest.TestCase):
         result = weather.weather_lookup("未来北京", "未来北京天气")
 
         self.assertIn("今天、明天、后天", result)
+
+    def test_llm_extraction_of_weather_params_succeeds(self) -> None:
+        """验证 LLM 提取路径：城市别名 + 大后天"""
+        weather.llm_extract_weather_params = lambda text: {
+            "city": "上海",
+            "day_offset": 3,
+            "unsupported_reason": "",
+        }
+        calls: list[tuple[str, int]] = []
+
+        def fake_open_meteo(city: str, day_offset: int = 0) -> str:
+            calls.append((city, day_offset))
+            return f"{city}:{day_offset}"
+
+        weather.open_meteo_weather_lookup = fake_open_meteo
+
+        result = weather.weather_lookup("魔都大后天天气", "/weather 魔都大后天天气")
+
+        self.assertEqual(result, "上海:3")
+        self.assertEqual(calls, [("上海", 3)])
+
+    def test_llm_extraction_rejects_unsupported_date_range(self) -> None:
+        """验证 LLM 提取路径：周末等不支持日期"""
+        weather.llm_extract_weather_params = lambda text: {
+            "city": "杭州",
+            "day_offset": -1,
+            "unsupported_reason": "周末",
+        }
+
+        result = weather.weather_lookup("周末杭州天气", "/weather 周末杭州天气")
+
+        self.assertIn("暂时查不了", result)
+        self.assertIn("周末", result)
+
+    def test_llm_extraction_empty_city_asks_for_city(self) -> None:
+        """验证 LLM 提取路径：只有日期没有城市"""
+        weather.llm_extract_weather_params = lambda text: {
+            "city": "",
+            "day_offset": 2,
+            "unsupported_reason": "",
+        }
+
+        result = weather.weather_lookup("后天", "/weather 后天")
+
+        self.assertIn("想查哪里的天气", result)
 
 
 if __name__ == "__main__":

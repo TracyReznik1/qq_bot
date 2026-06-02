@@ -5,6 +5,7 @@ from src.chat.memory import add_global_memory, add_personal_memory
 from src.config import config
 from src.router import Route
 
+from .bsearch import bsearch_reply
 from . import weather
 from .help import help_text
 from .image import image_disabled_text
@@ -72,11 +73,17 @@ def _search_command(query: str, context: CommandContext) -> CommandResult:
     return _text_result(search_reply(query, context.session_key, context.raw_message))
 
 
+def _bsearch_command(query: str, context: CommandContext) -> CommandResult:
+    return _text_result(bsearch_reply(query, context.session_key, context.raw_message))
+
+
 COMMANDS: dict[str, CommandHandler] = {
     "help": _help_command,
     "h": _help_command,
     "search": _search_command,
     "s": _search_command,
+    "bsearch": _bsearch_command,
+    "bs": _bsearch_command,
     "weather": _weather_command,
     "w": _weather_command,
     "remember": _remember_command,

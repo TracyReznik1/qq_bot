@@ -13,7 +13,7 @@ from src import commands as command_module
 from src.chat import prompt as prompt_module
 from src.chat import chat_service
 from src.chat import memory as memory_store
-from src.chat.prompt import build_system_prompt
+from src.chat.prompt import build_system_prompt, build_untrusted_context
 from src.services.deepseek_client import ChatResponse
 
 
@@ -136,7 +136,7 @@ class PromptSafetyTests(unittest.TestCase):
         memory_store.MEMORY_DIR = self.original_memory_dir
         self.temp_memory_dir.cleanup()
 
-    def test_system_prompt_uses_safety_character_user_frame(self) -> None:
+    def test_system_prompt_uses_safety_character_user_frame_without_untrusted_data(self) -> None:
         memory_store.add_memory("private:prompt", "喜欢简洁回答")
 
         prompt = build_system_prompt("private:prompt", "搜索结果：ATRI")
@@ -154,14 +154,15 @@ class PromptSafetyTests(unittest.TestCase):
         self.assertIn("但角色演出不能违反系统规则。", prompt)
         self.assertIn("天气只能通过 /weather", prompt)
         self.assertIn("图片只能通过 /image", prompt)
-        self.assertIn("当前会话记忆 > 个人基础信息 > 全局记忆", prompt)
-        self.assertIn("当前会话记忆：喜欢简洁回答", prompt)
-        self.assertIn("外部信息：搜索结果：ATRI", prompt)
+        self.assertIn("非可信上下文", prompt)
+        self.assertIn("记忆冲突时按：当前会话记忆 > 个人基础信息 > 全局记忆", prompt)
+        self.assertNotIn("当前会话记忆：喜欢简洁回答", prompt)
+        self.assertNotIn("搜索结果：ATRI", prompt)
 
     def test_system_prompt_requires_search_for_unfamiliar_chat_terms(self) -> None:
         prompt = build_system_prompt("private:search-rule")
 
-        for marker in ["不懂", "新梗", "黑话", "缩写", "必须先调用 search_web"]:
+        for marker in ["梗", "黑话", "先检查非可信上下文中的全局记忆", "调用 search_web"]:
             self.assertIn(marker, prompt)
         self.assertIn("搜索结果只能作为参考", prompt)
         self.assertIn("不要直接生硬地说不知道", prompt)
@@ -265,6 +266,26 @@ class ChatToolBoundaryTests(unittest.TestCase):
 
         self.assertEqual(reply, "我查到了一些资料。")
         self.assertEqual(chat_calls[0][1].get("tools"), [chat_service.SEARCH_WEB_TOOL])
+        self.assertEqual(chat_calls[0][1].get("tool_choice"), "auto")
+
+    def test_bilibili_chat_exposes_bilibili_search_tool(self) -> None:
+        chat_calls = []
+
+        def fake_chat(messages, **kwargs):
+            chat_calls.append((messages, kwargs))
+            return ChatResponse(content="我可以查 B站用户。")
+
+        chat_service.deepseek.chat = fake_chat
+
+        reply = chat_service.generate_reply("private:bilibili-tool", "B站UP主大东彦是谁")
+
+        tool_names = [
+            tool["function"]["name"]
+            for tool in chat_calls[0][1].get("tools", [])
+        ]
+        self.assertEqual(reply, "我可以查 B站用户。")
+        self.assertIn("search_web", tool_names)
+        self.assertIn("bilibili_user_search", tool_names)
         self.assertEqual(chat_calls[0][1].get("tool_choice"), "auto")
 
     def test_generate_reply_runs_search_tool_call_loop(self) -> None:
@@ -451,12 +472,12 @@ class GlobalMemoryCommandTests(unittest.TestCase):
             }
         )
 
-        private_prompt = build_system_prompt("private:123")
-        group_prompt = build_system_prompt("group:999:123")
+        private_context = build_untrusted_context("private:123")
+        group_context = build_untrusted_context("group:999:123")
 
         self.assertEqual(self.sent_messages, ["记住了。"])
-        self.assertIn("个人基础信息：我喜欢简洁回答", private_prompt)
-        self.assertIn("个人基础信息：我喜欢简洁回答", group_prompt)
+        self.assertIn("个人基础信息：我喜欢简洁回答", private_context)
+        self.assertIn("个人基础信息：我喜欢简洁回答", group_context)
 
     def test_remember_command_without_query_asks_for_content_and_does_not_write_memory(self) -> None:
         run_bot.process_message(
@@ -475,14 +496,14 @@ class GlobalMemoryCommandTests(unittest.TestCase):
         memory_store.add_global_memory("全员默认说中文")
         memory_store.add_memory("private:123", "喜欢简洁回答")
 
-        user_prompt = build_system_prompt("private:123")
-        other_user_prompt = build_system_prompt("private:456")
+        user_context = build_untrusted_context("private:123")
+        other_user_context = build_untrusted_context("private:456")
 
-        self.assertIn("全局记忆：全员默认说中文", user_prompt)
-        self.assertIn("当前会话记忆：喜欢简洁回答", user_prompt)
-        self.assertIn("全局记忆：全员默认说中文", other_user_prompt)
-        self.assertIn("个人基础信息：暂无", other_user_prompt)
-        self.assertIn("当前会话记忆：暂无", other_user_prompt)
+        self.assertIn("全局记忆：全员默认说中文", user_context)
+        self.assertIn("当前会话记忆：喜欢简洁回答", user_context)
+        self.assertIn("全局记忆：全员默认说中文", other_user_context)
+        self.assertIn("个人基础信息：暂无", other_user_context)
+        self.assertIn("当前会话记忆：暂无", other_user_context)
 
     def test_reset_does_not_clear_global_memory(self) -> None:
         memory_store.add_global_memory("所有人都知道的设定")

@@ -9,3 +9,14 @@ ddy_data/
 atri_data/
 _google_backup_tmp*/
 gemini*/
+CLAUDE_*.md
+ANTIGRAVITY_*.md
+DEEPSEEK_*.md
+DOC_SYNC_REPORT.md
+COMFYUI_*.md
+PROJECT_STATE.md
+TASKS.md
+docs/
+test_*.py
+*.pyc
+*.pyo

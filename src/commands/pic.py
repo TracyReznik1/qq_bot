@@ -9,6 +9,7 @@ from pathlib import Path
 
 from src.config import config
 from src.services.image_search_service import search_and_download_images
+from src.services.onebot_client import build_cq_image_file
 
 
 def pic_reply(query: str, context) -> str:
@@ -59,12 +60,12 @@ def pic_reply(query: str, context) -> str:
         return f"没有找到关于「{keywords}」的图片，请尝试换个关键词。"
 
     # 5. Build reply with CQ:image and source info
+    # Image CQ codes are built via the shared helper so that the
+    # base64 fallback in OneBotClient.send_image() takes effect.
     lines: list[str] = []
     for i, result in enumerate(results):
-        # Send image via CQ code
         safe_path = str(Path(result.local_path).resolve())
-        uri = Path(safe_path).as_uri()
-        lines.append(f"[CQ:image,file={uri}]")
+        lines.append(build_cq_image_file(safe_path))
 
         # Append source info
         source_parts: list[str] = []

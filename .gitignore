@@ -1,6 +1,7 @@
 .env
 __pycache__/
 *.pyc
+*.pyo
 .idea/
 .claude/
 .codex_tmp/
@@ -16,7 +17,8 @@ DOC_SYNC_REPORT.md
 COMFYUI_*.md
 PROJECT_STATE.md
 TASKS.md
+REFACTOR_REQUIREMENTS.md
+AGENTS.md
+ARCHITECTURE.md
 docs/
 test_*.py
-*.pyc
-*.pyo

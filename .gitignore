@@ -22,3 +22,4 @@ AGENTS.md
 ARCHITECTURE.md
 docs/
 test_*.py
+test_onebot_*.py

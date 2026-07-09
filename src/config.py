@@ -100,6 +100,8 @@ class Config:
     video_max_seconds: int = env_int("VIDEO_MAX_SECONDS", 600)
     history_turns: int = env_int("HISTORY_TURNS", 8)
     memory_limit: int = env_int("MEMORY_LIMIT", 30)
+    message_workers: int = env_int("MESSAGE_WORKERS", 8)
+    message_queue_max_size: int = env_int("MESSAGE_QUEUE_MAX_SIZE", 100)
     persist_history: bool = env_bool("PERSIST_HISTORY", True)
     request_timeout: float = env_float("REQUEST_TIMEOUT", 18.0)
     max_reply_chars: int = env_int("MAX_REPLY_CHARS", 1700)
@@ -136,6 +138,10 @@ class Config:
     image_search_send_max: int = env_int("IMAGE_SEARCH_SEND_MAX", 3)
     image_search_cache_dir: str = os.getenv("IMAGE_SEARCH_CACHE_DIR", "atri_data/image_search_cache")
     image_search_max_download_mb: int = env_int("IMAGE_SEARCH_MAX_DOWNLOAD_MB", 8)
+
+    # ── Image Send (base64 fallback) ──
+    image_send_base64_fallback: bool = env_bool("IMAGE_SEND_BASE64_FALLBACK", True)
+    image_send_base64_max_mb: int = env_int("IMAGE_SEND_BASE64_MAX_MB", 8)
 
     # Optional ComfyUI node ID overrides (leave empty for auto-detection)
     comfyui_positive_node_id: str = os.getenv("COMFYUI_POSITIVE_NODE_ID", "").strip()

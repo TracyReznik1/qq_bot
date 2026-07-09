@@ -46,7 +46,7 @@ ATRI 支持多模型 fallback。默认使用：
 run_bot.py                 兼容启动入口
 src/main.py                Flask 回调、消息分发、群聊 @ 检查、回复发送
 src/router.py              区分 / 命令和普通聊天
-src/messaging.py           消息去重、按会话顺序处理
+src/messaging.py           消息去重、会话级队列（同 session 串行、不同 session 并行）
 src/config.py              .env 配置读取
 src/chat/                  聊天生成、提示词、记忆和聊天工具调用
 src/commands/              /search、/url、/video、/weather、/buser、/remember、/pic、/image 等命令
@@ -239,7 +239,11 @@ B站UP主大东彦是谁
   - 默认使用本地 Anima 高清增强版工作流，路径为 `D:\Desktop\AI生图\workflows\anima\03_anima_enhanced_api.json`，默认 preset 为 `highres_output`。
   - LoRA 接口（角色与风格）已保留，但默认关闭。
   - 普通聊天不会自动触发图片生成工具。
-  - 已知限制：base64 fallback 发图机制待实现；NapCat file URI 发图兼容性以本机实际测试为准；在没有 LoRA 或参考图输入的情况下，指定角色的外观一致性有限。
+  - 已知限制：在没有 LoRA 或参考图输入的情况下，指定角色的外观一致性有限。
+- 图片发送：`/pic` 和 `/image` 共享统一的 OneBot 图片发送能力。
+  - 优先使用 `file:///` 本地路径发送。
+  - 如果 file URI 发送失败，自动 fallback 到 `base64://`（默认开启，受 `IMAGE_SEND_BASE64_FALLBACK` 控制，默认 8 MB 上限）。
+  - 日志不会输出完整 base64 内容。
 - 图片搜索：已实现 `/pic` 搜图发图命令，默认关闭。
   - 需在 `.env` 中设置 `IMAGE_SEARCH_ENABLE=true` 并配置 `TAVILY_API_KEY`。
   - 默认返回 1 张图，`/pic 关键词 3` 最多 3 张。

@@ -30,9 +30,17 @@ _startup_initialized = False
 onebot = OneBotClient(config)
 
 message_queue = MessageQueue(
-    max_workers=4,
+    max_workers=config.message_workers,
     max_processed_message_ids=MAX_PROCESSED_MESSAGE_IDS,
+    max_queue_size=config.message_queue_max_size,
 )
+
+
+def message_preview(text: str, limit: int = 80) -> str:
+    preview = " ".join(str(text or "").split())
+    if len(preview) > limit:
+        return preview[:limit] + "..."
+    return preview
 
 
 def startup() -> None:
@@ -45,9 +53,13 @@ def startup() -> None:
 
 
 def strip_bot_mention(raw_msg: str, self_id: str) -> tuple[bool, str]:
-    at_me = f"[CQ:at,qq={self_id}]"
-    if at_me in raw_msg:
-        return True, raw_msg.replace(at_me, "").strip()
+    import re
+
+    pattern = re.compile(rf"\[CQ:at,qq={re.escape(self_id)}(?:,[^\]]*)?\]")
+    if pattern.search(raw_msg):
+        stripped = pattern.sub("", raw_msg).strip()
+        stripped = re.sub(r"^(?:\[CQ:reply,[^\]]+\]\s*)+", "", stripped).strip()
+        return True, stripped
     return False, raw_msg.strip()
 
 
@@ -71,41 +83,152 @@ def split_reply(text: str) -> list[str]:
     return parts
 
 
+import re
+
+_CQ_IMAGE_FILE = re.compile(r"\[CQ:image,file=file:///([^]]+)\]")
+
+
 def send_reply(target_id: Any, text: str, is_group: bool) -> None:
-    for part in split_reply(text):
-        onebot.send_msg(target_id, part, is_group=is_group)
-        time.sleep(0.2)
+    """Send a reply, routing embedded CQ:image codes through send_image."""
+
+    # Split text parts from inline image parts
+    parts = re.split(r"(\[CQ:image,file=[^]]+?\])", text)
+    # re.split captures separators into alternating positions:
+    # ["text before ", "[CQ:image,...]", " text after", ...]
+    images_sent = False  # track whether we sent at least one image
+
+    for part in parts:
+        stripped = (part or "").strip()
+        if not stripped:
+            continue
+
+        img_match = _CQ_IMAGE_FILE.match(stripped)
+        if img_match:
+            # Extract the local file path from the CQ code
+            file_uri = img_match.group(1)
+            from pathlib import Path
+            local_path = Path(file_uri).as_posix()
+            try:
+                # Reconstruct the native path on this platform
+                local_path = str(Path(file_uri))
+            except Exception:
+                pass
+            logger.info(
+                "send_reply detected CQ:image target_id=%s is_group=%s path=%s",
+                target_id,
+                is_group,
+                Path(file_uri).name if file_uri else "?",
+            )
+            success = onebot.send_image(target_id, local_path, is_group=is_group)
+            if success:
+                images_sent = True
+            else:
+                logger.warning(
+                    "send_reply image send failed target_id=%s is_group=%s path=%s",
+                    target_id,
+                    is_group,
+                    Path(file_uri).name if file_uri else "?",
+                )
+        else:
+            # Regular text — send as usual (preserving original split_reply behaviour
+            # for long text: we still call split_reply per text part)
+            text_parts = split_reply(stripped)
+            for tp in text_parts:
+                delay = 0.2 if images_sent else 0.2
+                onebot.send_msg(target_id, tp, is_group=is_group)
+                time.sleep(delay)
+
+    # Fallback: if there were no parts at all, treat as empty
+    if not parts or all(not (p or "").strip() for p in parts):
+        logger.info("Reply skipped: empty text target_id=%s is_group=%s", target_id, is_group)
 
 
 def process_message(data: dict[str, Any]) -> None:
     uid = str(data.get("user_id", ""))
     raw_msg = str(data.get("raw_message", "")).strip()
     if not uid or not raw_msg:
+        logger.info(
+            "Message ignored: missing uid or raw_message message_type=%s group_id=%s user_id=%s message_id=%s",
+            data.get("message_type"),
+            data.get("group_id"),
+            data.get("user_id"),
+            data.get("message_id"),
+        )
         return
 
     is_group = data.get("message_type") == "group"
     self_id = str(data.get("self_id", ""))
     target_id = data.get("group_id") if is_group else uid
+    session_key = get_event_session_key(data) or ""
+
+    if is_group:
+        logger.info(
+            "Group message received group_id=%s user_id=%s self_id=%s message_id=%s require_group_at=%s raw=%r",
+            data.get("group_id"),
+            uid,
+            self_id,
+            data.get("message_id"),
+            config.require_group_at,
+            message_preview(raw_msg),
+        )
 
     if is_group and config.require_group_at:
         mentioned, raw_msg = strip_bot_mention(raw_msg, self_id)
+        logger.info(
+            "Group mention check group_id=%s user_id=%s self_id=%s message_id=%s mentioned=%s stripped=%r",
+            data.get("group_id"),
+            uid,
+            self_id,
+            data.get("message_id"),
+            mentioned,
+            message_preview(raw_msg),
+        )
         if not mentioned:
+            logger.info(
+                "Group message ignored: bot not mentioned group_id=%s user_id=%s message_id=%s",
+                data.get("group_id"),
+                uid,
+                data.get("message_id"),
+            )
             return
         if not raw_msg:
+            logger.info(
+                "Group message ignored: mention-only message group_id=%s user_id=%s message_id=%s",
+                data.get("group_id"),
+                uid,
+                data.get("message_id"),
+            )
             return
 
     try:
         route = route_message(raw_msg)
+        logger.info(
+            "Message routed session_key=%s is_group=%s handler=%s command=%s query=%r",
+            session_key,
+            is_group,
+            route.handler,
+            route.command,
+            message_preview(route.query),
+        )
         if route.handler == "command":
             result = handle_command(
                 route,
-                CommandContext(uid=uid, session_key=get_event_session_key(data) or "", raw_message=raw_msg),
+                CommandContext(uid=uid, session_key=session_key, raw_message=raw_msg),
+            )
+            logger.info(
+                "Command handled session_key=%s command=%s handled=%s reply_chars=%s",
+                session_key,
+                route.command,
+                result.handled,
+                len(result.reply or ""),
             )
             if result.handled and result.reply:
                 send_reply(target_id, result.reply, is_group)
             return
 
-        reply = generate_reply(get_event_session_key(data) or "", raw_msg)
+        logger.info("Generating chat reply session_key=%s is_group=%s", session_key, is_group)
+        reply = generate_reply(session_key, raw_msg)
+        logger.info("Chat reply generated session_key=%s reply_chars=%s", session_key, len(reply or ""))
         send_reply(target_id, reply, is_group)
     except RuntimeError as error:
         logger.exception("Configuration error")
@@ -137,11 +260,22 @@ def is_callback_authorized() -> bool:
 @app.route("/", methods=["POST"])
 def onebot_event() -> dict[str, str] | tuple[dict[str, str], int]:
     if not is_callback_authorized():
+        logger.warning("Rejected unauthorized OneBot callback")
         return {"status": "forbidden"}, 403
 
     data = request.get_json(silent=True) or {}
-    if data.get("post_type") == "message" and mark_message_seen(data, message_queue):
-        enqueue_message(data, message_queue, process_message_safely)
+    if data.get("post_type") == "message":
+        seen = mark_message_seen(data, message_queue)
+        logger.info(
+            "OneBot message callback message_type=%s group_id=%s user_id=%s message_id=%s accepted=%s",
+            data.get("message_type"),
+            data.get("group_id"),
+            data.get("user_id"),
+            data.get("message_id"),
+            seen,
+        )
+        if seen:
+            enqueue_message(data, message_queue, process_message_safely)
     return {"status": "ok"}
 
 
@@ -150,6 +284,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "bot_name": config.bot_name,
+        "gemini_configured": bool(config.gemini_api_key),
         "deepseek_configured": bool(config.deepseek_api_key),
         "onebot_url": config.onebot_url,
         "require_group_at": config.require_group_at,

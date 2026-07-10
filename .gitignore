@@ -9,3 +9,11 @@ ddy_data/
 atri_data/
 _google_backup_tmp*/
 gemini*/
+# Local test sources: keep locally, do not publish
+test_*.py
+*_test.py
+tests/
+
+# Local Markdown documents: only publish root README.md
+*.md
+!README.md

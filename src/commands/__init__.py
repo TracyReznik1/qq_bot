@@ -5,12 +5,15 @@ from src.chat.memory import add_global_memory, add_personal_memory
 from src.config import config
 from src.router import Route
 
-from .bsearch import bsearch_reply
+from .bsearch import bfuser_reply, bfvideo_reply, buser_reply, bvideo_reply
 from . import weather
 from .help import help_text
-from .image import image_disabled_text
+from .image import image_reply
+from .pic import pic_reply
 from .reset import reset_context
 from .search import search_reply
+from .url import url_reply
+from .video import video_reply
 
 
 @dataclass(frozen=True)
@@ -37,8 +40,12 @@ def _help_command(_query: str, _context: CommandContext) -> CommandResult:
     return _text_result(help_text())
 
 
-def _image_command(_query: str, _context: CommandContext) -> CommandResult:
-    return _text_result(image_disabled_text())
+def _image_command(query: str, context: CommandContext) -> CommandResult:
+    return _text_result(image_reply(query, context))
+
+
+def _pic_command(query: str, context: CommandContext) -> CommandResult:
+    return _text_result(pic_reply(query, context))
 
 
 def _reset_command(_query: str, context: CommandContext) -> CommandResult:
@@ -73,8 +80,28 @@ def _search_command(query: str, context: CommandContext) -> CommandResult:
     return _text_result(search_reply(query, context.session_key, context.raw_message))
 
 
-def _bsearch_command(query: str, context: CommandContext) -> CommandResult:
-    return _text_result(bsearch_reply(query, context.session_key, context.raw_message))
+def _url_command(query: str, context: CommandContext) -> CommandResult:
+    return _text_result(url_reply(query, context.session_key, context.raw_message))
+
+
+def _video_command(query: str, context: CommandContext) -> CommandResult:
+    return _text_result(video_reply(query, context.session_key, context.raw_message))
+
+
+def _buser_command(query: str, context: CommandContext) -> CommandResult:
+    return _text_result(buser_reply(query, context.session_key, context.raw_message))
+
+
+def _bfuser_command(query: str, context: CommandContext) -> CommandResult:
+    return _text_result(bfuser_reply(query, context.session_key, context.raw_message))
+
+
+def _bvideo_command(query: str, context: CommandContext) -> CommandResult:
+    return _text_result(bvideo_reply(query, context.session_key, context.raw_message))
+
+
+def _bfvideo_command(query: str, context: CommandContext) -> CommandResult:
+    return _text_result(bfvideo_reply(query, context.session_key, context.raw_message))
 
 
 COMMANDS: dict[str, CommandHandler] = {
@@ -82,8 +109,22 @@ COMMANDS: dict[str, CommandHandler] = {
     "h": _help_command,
     "search": _search_command,
     "s": _search_command,
-    "bsearch": _bsearch_command,
-    "bs": _bsearch_command,
+    "url": _url_command,
+    "u": _url_command,
+    "video": _video_command,
+    "vid": _video_command,
+    "buser": _buser_command,
+    "bu": _buser_command,
+    "bfuser": _bfuser_command,
+    "bfu": _bfuser_command,
+    "bsearch": _buser_command,
+    "bs": _buser_command,
+    "bfsearch": _bfuser_command,
+    "bfs": _bfuser_command,
+    "bvideo": _bvideo_command,
+    "bv": _bvideo_command,
+    "bfvideo": _bfvideo_command,
+    "bfv": _bfvideo_command,
     "weather": _weather_command,
     "w": _weather_command,
     "remember": _remember_command,
@@ -92,6 +133,8 @@ COMMANDS: dict[str, CommandHandler] = {
     "gremember": _global_remember_command,
     "image": _image_command,
     "img": _image_command,
+    "pic": _pic_command,
+    "p": _pic_command,
     "reset": _reset_command,
 }
 

@@ -1,6 +1,7 @@
 .env
 __pycache__/
 *.pyc
+*.pyo
 .idea/
 .claude/
 .codex_tmp/
@@ -9,3 +10,16 @@ ddy_data/
 atri_data/
 _google_backup_tmp*/
 gemini*/
+CLAUDE_*.md
+ANTIGRAVITY_*.md
+DEEPSEEK_*.md
+DOC_SYNC_REPORT.md
+COMFYUI_*.md
+PROJECT_STATE.md
+TASKS.md
+REFACTOR_REQUIREMENTS.md
+AGENTS.md
+ARCHITECTURE.md
+docs/
+test_*.py
+*.bat

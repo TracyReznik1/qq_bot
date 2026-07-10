@@ -5,14 +5,14 @@ from typing import Any
 from urllib.parse import quote
 
 from src.config import config
-from src.services.deepseek_client import DeepSeekClient
+from src.services.llm_client import get_llm_client
 from src.services.search_service import web_search
 from src.util import try_proxied_get
 
 
 logger = logging.getLogger("qq-bot")
 
-deepseek = DeepSeekClient(config)
+llm = get_llm_client()
 
 WEATHER_EXTRACT_PROMPT = (
     "从用户输入中提取天气查询的城市和日期偏移量。严格按照 JSON 返回。\n"
@@ -38,7 +38,7 @@ WEATHER_EXTRACT_PROMPT = (
 def llm_extract_weather_params(text: str) -> dict[str, Any] | None:
     """用 LLM 从自然语言中提取城市和日期偏移量。失败返回 None。"""
     try:
-        response = deepseek.chat(
+        response = llm.chat(
             messages=[
                 {"role": "system", "content": WEATHER_EXTRACT_PROMPT},
                 {"role": "user", "content": text},

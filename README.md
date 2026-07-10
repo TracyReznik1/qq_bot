@@ -1,92 +1,93 @@
 # ATRI QQ 聊天机器人
 
-这是一个基于 Flask + OneBot HTTP API + DeepSeek 的 QQ 聊天机器人。
+ATRI 是一个本地运行的 QQ 聊天机器人，基于 Flask + OneBot HTTP API + 多模型 LLM（Gemini / DeepSeek fallback 链）。
 
-## 功能
+## 功能概览
 
-- 私聊和群聊对话
-- 群聊默认需要 @ ATRI 才响应
-- 普通聊天默认只给模型 `search_web`；检测到 B站、bilibili、UP主、主播等语境时，才额外提供 `bilibili_user_search`
-- 普通聊天遇到最新信息、实时信息、冷门知识、专有名词、圈内昵称或梗时可以联网搜索；搜不到时会按 ATRI 的性格带着不确定性继续回答
-- `/search` 搜索成功时会结合模型整理回答
-- `/bsearch` 查询 B站公开用户、UP主、主播资料
-- `/weather` 命令查询今天、明天、后天天气；普通聊天不会自动查天气
-- `/reset` 只清空当前会话上下文
-- `/remember` 保存跨私聊和群聊生效的个人基础信息
-- `/globalremember` 保存对所有用户生效的全局记忆，仅管理员可写
-- DeepSeek、OneBot、代理、端口都从 `.env` 配置
+**聊天**：自然对话，遇到实时/冷门/不确定的内容会自动联网搜索后回答。
 
-## 安装
+**命令**：
+
+| 命令 | 说明 |
+|---|---|
+| `/search <关键词>` | 网页搜索（Tavily + DDGS fallback） |
+| `/url <网址>` | 读取网页内容并总结 |
+| `/video <链接>` | 理解视频（B站标题/字幕/页面文字） |
+| `/buser` `/bfuser` | B站用户搜索 |
+| `/bvideo` `/bfvideo` | B站视频搜索 |
+| `/weather <城市>` | 天气查询（今天/明天/后天/大后天） |
+| `/remember <内容>` | 个人记忆 |
+| `/globalremember <内容>` | 全局记忆（管理员） |
+| `/reset` | 清空当前会话上下文 |
+| `/image <描述>` | ComfyUI 本地生图（需配置 IMAGE_ENABLE=true，管理员） |
+| `/pic <关键词> [数量]` | 搜索图片并发送（需配置 IMAGE_SEARCH_ENABLE=true） |
+
+**图片发送**：`/pic` 和 `/image` 共享统一的图片发送能力，优先 `file:///`，失败自动 fallback `base64://`。
+
+**会话并发**：同一用户消息按顺序处理，不同用户并行处理，互不堵塞。
+
+## 快速开始
 
 ```powershell
-python -m pip install -r requirements.txt
+# 安装依赖
+pip install -r requirements.txt
+
+# 配置
+copy .env.example .env    # 编辑 .env，至少填入 GEMINI_API_KEY 或 DEEPSEEK_API_KEY
+
+# 启动
+python run_bot.py
+# 或双击 启动ATRI.bat
 ```
 
 ## 配置
 
-复制 `.env.example` 的内容到 `.env`，至少确认这些值：
+`.env` 关键项：
 
 ```env
-DEEPSEEK_API_KEY=sk-your-key-here
+GEMINI_API_KEY=          # 推荐，免费获取 https://aistudio.google.com/apikey
+DEEPSEEK_API_KEY=        # 备选
+TAVILY_API_KEY=          # 搜索用 https://tavily.com
+ADMIN_QQ_IDS=            # 你的QQ号
 ONEBOT_API_URL=http://127.0.0.1:3000
-BOT_HOST=127.0.0.1
-CALLBACK_SECRET=
-PROXY_URL=
-ADMIN_QQ_IDS=123456,234567
 ```
 
-如果你需要代理，再把 `PROXY_URL` 改成你的代理地址，例如：
+详见 `.env.example`。
 
-```env
-PROXY_URL=http://127.0.0.1:7890
-```
+## OneBot
 
-OneBot 端需要把 HTTP 事件上报地址设置为：
+ATRI 监听 `http://127.0.0.1:5000/`，向 OneBot `http://127.0.0.1:3000` 发消息。
+
+在 NapCat / Lagrange 中将 HTTP 事件上报设为 `http://127.0.0.1:5000/`。
+
+## 模型 Fallback
+
+默认链路：Gemini 3.1 Flash-Lite → Gemma 4 26B → DeepSeek V4 Flash → DeepSeek V4 Pro
+
+一个挂了自动切下一个。想只用 DeepSeek 可设 `LLM_PRIMARY_PROVIDER=deepseek`。
+
+## 项目结构
 
 ```text
-http://127.0.0.1:5000/
+run_bot.py             启动入口
+src/main.py            Flask 回调、消息分发
+src/router.py          命令 vs 聊天路由
+src/messaging.py       消息去重、会话级队列
+src/config.py          .env 配置
+src/chat/              聊天生成、prompt、记忆
+src/commands/          命令实现
+src/services/          LLM、OneBot、搜索、生图等
+src/utils/             JSON 存储
+启动ATRI.bat           Windows 一键启动
 ```
 
-默认只监听本机 `127.0.0.1`。如果 OneBot 不在同一台机器上，需要把 `BOT_HOST` 改成可访问地址，并建议配置 `CALLBACK_SECRET`；配置后，OneBot 回调请求需要带 `Authorization: Bearer <CALLBACK_SECRET>` 或 `X-ATRI-Callback-Secret: <CALLBACK_SECRET>`。
+## 群聊
 
-## 启动
+默认需要 `@ATRI` 才响应。`.env` 设 `REQUIRE_GROUP_AT=false` 可关闭。
 
-```powershell
-python run_bot.py
-```
+## 行为边界
 
-`run_bot.py` 是兼容入口，实际应用入口在 `src/main.py`。
-
-浏览器打开下面地址可以检查机器人服务是否启动：
-
-```text
-http://127.0.0.1:5000/health
-```
-
-## 用法示例
-
-```text
-你好
-kskbl 是什么意思
-/search DeepSeek 最新消息
-/bsearch 大东彦
-/weather 北京
-/remember 我喜欢简洁回答
-/globalremember 所有人都知道的设定
-/reset
-/help
-```
-
-`ADMIN_QQ_IDS` 用英文逗号分隔。没有配置管理员时，`/globalremember` 默认禁止写入。
-
-## 文件说明
-
-- `run_bot.py`：兼容启动入口
-- `src/main.py`：机器人主程序和 Flask 回调
-- `src/router.py`：区分 `/` 命令和默认聊天
-- `src/chat/`：普通聊天、提示词、记忆、聊天可用的 `search_web` 和条件暴露的 `bilibili_user_search`
-- `src/commands/`：命令功能，例如 `/weather`、`/bsearch`
-- `src/services/`：DeepSeek 和搜索服务客户端
-- `test_deepseek.py`：DeepSeek 连通性测试
-- `.env.example`：配置模板
-- `atri_data/memories`：保存当前会话记忆、个人基础信息和全局记忆
+- 普通聊天只暴露 `search_web` / `fetch_url` / `understand_video_url` / B站搜索等受控工具
+- 天气、图片生成、图片搜索必须通过 `/` 命令触发
+- Pixiv / R18 / lolicon 自动抓图已移除
+- 本地数据（聊天记录、记忆、图片缓存）保存在 `atri_data/`，已 gitignore

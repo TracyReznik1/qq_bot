@@ -56,15 +56,11 @@ class MessageQueue:
     * ``active_session_workers`` tracks which sessions currently have a worker running.
     * When ``enqueue`` sees a new session (not already active), it submits a
       ``_drain_session`` call to the thread pool.
-    * ``_drain_session`` pops messages one-by-one; after each pop it re-checks
-      the queue.  If the queue is now empty, it removes the session from
-      ``active_session_workers`` and exits.
-    * **Race-condition fix**: between the last ``popleft`` and the check in the
-      next ``while`` iteration, another thread could enqueue a new message
-      while the worker is about to discard the session.  To prevent that
-      message from being stranded, the worker holds the lock across the
-      pop and the empty-check, and only starts a new worker if the session
-      had a non-zero queue length **after** the pop.
+    * ``_drain_session`` keeps the session marked active while ``process_func``
+      runs.  It removes the queue and active marker only when the next locked
+      iteration finds no waiting messages.
+    * A message enqueued during processing is appended to the existing queue
+      without starting a second worker for the same session.
     """
 
     def __init__(self, max_workers: int = 8, max_processed_message_ids: int = 500,
@@ -123,28 +119,17 @@ class MessageQueue:
         import logging
 
         while True:
-            # ── Critical section: pop + empty-check + optional restart ──
+            # Keep the session active until the current message has finished.
+            # The next locked iteration atomically decides whether to process
+            # another queued message or clean up and exit.
             with self.session_queue_lock:
                 queue = self.session_message_queues.get(session_key)
                 if not queue:
-                    # No queue at all — clean up and exit
                     self.session_message_queues.pop(session_key, None)
                     self.active_session_workers.discard(session_key)
                     return
 
                 data = queue.popleft()
-
-                # After popping, check whether more messages remain.
-                # If NOT empty, keep the worker marked active so the next
-                # loop iteration picks up the next message.
-                # If empty, unmark the session.  Any message that arrives
-                # between now and the next enqueue() call will see
-                # session_key NOT in active_session_workers and start a new
-                # worker — so no message is stranded.
-                still_has_messages = bool(queue)
-                if not still_has_messages:
-                    self.session_message_queues.pop(session_key, None)
-                    self.active_session_workers.discard(session_key)
 
             # ── Process outside the lock so other sessions can enqueue ──
             try:
@@ -153,9 +138,6 @@ class MessageQueue:
                 logging.getLogger("qq-bot").exception(
                     "Background message processing failed"
                 )
-
-            if not still_has_messages:
-                return
 
 
 # ── module-level helpers (delegate to MessageQueue instance) ────────

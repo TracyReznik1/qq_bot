@@ -162,6 +162,55 @@ class CallbackQuickReturnTests(unittest.TestCase):
 class SameSessionNoConcurrentWorkerTests(unittest.TestCase):
     """Only one worker may process a given session at a time."""
 
+    def test_enqueue_while_first_message_is_processing_stays_serial(self):
+        first_started = threading.Event()
+        second_started = threading.Event()
+        second_done = threading.Event()
+        release_first = threading.Event()
+        state_lock = threading.Lock()
+        active = 0
+        max_active = 0
+        order = []
+
+        def process(data):
+            nonlocal active, max_active
+            with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+                order.append(data["raw_message"])
+            try:
+                if data["raw_message"] == "first":
+                    first_started.set()
+                    release_first.wait(timeout=5)
+                else:
+                    second_started.set()
+            finally:
+                with state_lock:
+                    active -= 1
+                if data["raw_message"] == "second":
+                    second_done.set()
+
+        q = MessageQueue(max_workers=2)
+        try:
+            q.enqueue(_msg("R", "first", msg_id="race_1"), process)
+            self.assertTrue(first_started.wait(timeout=2))
+
+            q.enqueue(_msg("R", "second", msg_id="race_2"), process)
+            q.executor.submit(lambda: None).result(timeout=2)
+
+            self.assertFalse(
+                second_started.is_set(),
+                "second message started before the first message completed",
+            )
+
+            release_first.set()
+            self.assertTrue(second_done.wait(timeout=2))
+            self.assertEqual(order, ["first", "second"])
+            self.assertEqual(max_active, 1)
+        finally:
+            release_first.set()
+            q.executor.shutdown(wait=True)
+
     def test_same_session_never_has_two_active_workers(self):
         active_counts = []
         lock = threading.Lock()

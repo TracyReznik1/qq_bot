@@ -7,8 +7,11 @@ from src.chat import chat_service
 from src.commands import search as search_command
 from src.router import route_message
 from src.services import bilibili_search
+from src.services import llm_client
 from src.services import deepseek_client
+from src.services.llm_types import ChatResponse
 from src.services import search_service
+ChatResponse = ChatResponse  # make available module-wide
 
 
 class SearchResultStatusTests(unittest.TestCase):
@@ -270,13 +273,13 @@ class BilibiliSearchCommandTests(unittest.TestCase):
 
 class ChatSearchToolLoopFailureTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.original_deepseek_chat = chat_service.deepseek.chat
+        self.original_llm_chat = chat_service.llm.chat
         self.original_search_web = chat_service.search_web
         self.original_bilibili_user_search = getattr(chat_service, "bilibili_user_search", None)
         self.chat_calls = []
 
     def tearDown(self) -> None:
-        chat_service.deepseek.chat = self.original_deepseek_chat
+        chat_service.llm.chat = self.original_llm_chat
         chat_service.search_web = self.original_search_web
         if self.original_bilibili_user_search is None:
             if hasattr(chat_service, "bilibili_user_search"):
@@ -301,10 +304,10 @@ class ChatSearchToolLoopFailureTests(unittest.TestCase):
         def fake_chat(messages, **kwargs):
             self.chat_calls.append((messages, kwargs))
             if len(self.chat_calls) == 1:
-                return deepseek_client.ChatResponse(tool_calls=tool_calls)
-            return deepseek_client.ChatResponse(content="我没搜到可靠来源。")
+                return ChatResponse(tool_calls=tool_calls)
+            return ChatResponse(content="我没搜到可靠来源。")
 
-        chat_service.deepseek.chat = fake_chat
+        chat_service.llm.chat = fake_chat
         chat_service.search_web = lambda _query: failure_message
 
         reply = chat_service.generate_reply("private:search-failure", "查一下 DeepSeek 最新消息")
@@ -331,10 +334,10 @@ class ChatSearchToolLoopFailureTests(unittest.TestCase):
         def fake_chat(messages, **kwargs):
             self.chat_calls.append((messages, kwargs))
             if len(self.chat_calls) == 1:
-                return deepseek_client.ChatResponse(tool_calls=tool_calls)
-            return deepseek_client.ChatResponse(content="我没搜到准确信息，但这看起来像圈内缩写或梗。")
+                return ChatResponse(tool_calls=tool_calls)
+            return ChatResponse(content="我没搜到准确信息，但这看起来像圈内缩写或梗。")
 
-        chat_service.deepseek.chat = fake_chat
+        chat_service.llm.chat = fake_chat
         chat_service.search_web = lambda _query: failure_message
 
         reply = chat_service.generate_reply("private:no-results", "kskbl是什么梗")
@@ -353,7 +356,7 @@ class ChatSearchToolLoopFailureTests(unittest.TestCase):
             self.chat_calls.append((messages, kwargs))
             return plain_reply
 
-        chat_service.deepseek.chat = fake_chat
+        chat_service.llm.chat = fake_chat
         chat_service.search_web = lambda query: searched_queries.append(query) or "不应该搜索"
 
         reply = chat_service.generate_reply("private:plain-json", "解释 tool_calls JSON")
@@ -365,9 +368,9 @@ class ChatSearchToolLoopFailureTests(unittest.TestCase):
     def test_tool_context_prompt_does_not_ask_model_to_call_search_again(self) -> None:
         def fake_chat(messages, **kwargs):
             self.chat_calls.append((messages, kwargs))
-            return deepseek_client.ChatResponse(content="根据 /search 结果整理好了。")
+            return ChatResponse(content="根据 /search 结果整理好了。")
 
-        chat_service.deepseek.chat = fake_chat
+        chat_service.llm.chat = fake_chat
 
         reply = chat_service.generate_reply(
             "private:command-search",
@@ -404,10 +407,10 @@ class ChatSearchToolLoopFailureTests(unittest.TestCase):
         def fake_chat(messages, **kwargs):
             self.chat_calls.append((messages, kwargs))
             if len(self.chat_calls) <= chat_service.MAX_TOOL_CALL_ROUNDS:
-                return deepseek_client.ChatResponse(tool_calls=tool_calls)
-            return deepseek_client.ChatResponse(content="根据搜索结果整理好了。")
+                return ChatResponse(tool_calls=tool_calls)
+            return ChatResponse(content="根据搜索结果整理好了。")
 
-        chat_service.deepseek.chat = fake_chat
+        chat_service.llm.chat = fake_chat
         chat_service.search_web = lambda _query: "搜索结果：DeepSeek 有新消息"
 
         reply = chat_service.generate_reply("private:round-limit", "DeepSeek 最新消息")
@@ -434,10 +437,10 @@ class ChatSearchToolLoopFailureTests(unittest.TestCase):
         def fake_chat(messages, **kwargs):
             self.chat_calls.append((messages, kwargs))
             if len(self.chat_calls) == 1:
-                return deepseek_client.ChatResponse(tool_calls=tool_calls)
-            return deepseek_client.ChatResponse(content="大东彦是 B站无畏契约教学UP主。")
+                return ChatResponse(tool_calls=tool_calls)
+            return ChatResponse(content="大东彦是 B站无畏契约教学UP主。")
 
-        chat_service.deepseek.chat = fake_chat
+        chat_service.llm.chat = fake_chat
         chat_service.bilibili_user_search = lambda query: searched_queries.append(query) or (
             "B站用户：大东彦\n摘要：无畏契约教学UP主\n链接：https://space.bilibili.com/179877838"
         )
@@ -467,7 +470,7 @@ class SearchWebToolKeywordExtractionTests(unittest.TestCase):
             raise unittest.SkipTest("DEEPSEEK_API_KEY not configured")
 
     def _extract_query(self, user_message: str) -> str | None:
-        client = chat_service.deepseek
+        client = chat_service.llm
         try:
             response = client.chat(
                 messages=[

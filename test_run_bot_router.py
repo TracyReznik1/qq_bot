@@ -14,7 +14,7 @@ from src.chat import prompt as prompt_module
 from src.chat import chat_service
 from src.chat import memory as memory_store
 from src.chat.prompt import build_system_prompt, build_untrusted_context
-from src.services.deepseek_client import ChatResponse
+from src.services.llm_types import ChatResponse
 
 
 class MainImportBoundaryTests(unittest.TestCase):
@@ -30,7 +30,6 @@ class MainImportBoundaryTests(unittest.TestCase):
                 imported_names.update(alias.asname or alias.name for alias in node.names)
 
         stale_names = {
-            "re",
             "deepseek",
             "extract_json",
             "MEMORY_DIR",
@@ -181,11 +180,11 @@ class PromptSafetyTests(unittest.TestCase):
 
 class ChatToolBoundaryTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.original_deepseek_chat = chat_service.deepseek.chat
+        self.original_llm_chat = chat_service.llm.chat
         self.original_search_web = getattr(chat_service, "search_web", None)
 
     def tearDown(self) -> None:
-        chat_service.deepseek.chat = self.original_deepseek_chat
+        chat_service.llm.chat = self.original_llm_chat
         if self.original_search_web is None:
             if hasattr(chat_service, "search_web"):
                 delattr(chat_service, "search_web")
@@ -215,7 +214,7 @@ class ChatToolBoundaryTests(unittest.TestCase):
             chat_calls.append((messages, kwargs))
             return ChatResponse(content="嗯嗯，在的。")
 
-        chat_service.deepseek.chat = fake_chat
+        chat_service.llm.chat = fake_chat
 
         reply = chat_service.generate_reply("private:no-search", "你好呀")
 
@@ -231,7 +230,7 @@ class ChatToolBoundaryTests(unittest.TestCase):
             chat_calls.append((messages, kwargs))
             return ChatResponse(content="听起来有点冷，抱抱。")
 
-        chat_service.deepseek.chat = fake_chat
+        chat_service.llm.chat = fake_chat
 
         reply = chat_service.generate_reply("private:weather-chat", "今天北京天气怎么样")
 
@@ -259,7 +258,7 @@ class ChatToolBoundaryTests(unittest.TestCase):
                 return ChatResponse(tool_calls=tool_calls)
             return ChatResponse(content="我查到了一些资料。")
 
-        chat_service.deepseek.chat = fake_chat
+        chat_service.llm.chat = fake_chat
         chat_service.search_web = lambda _query: "搜索结果：smoggy 相关资料"
 
         reply = chat_service.generate_reply("private:smoggy", "smoggy是谁")
@@ -275,7 +274,7 @@ class ChatToolBoundaryTests(unittest.TestCase):
             chat_calls.append((messages, kwargs))
             return ChatResponse(content="我可以查 B站用户。")
 
-        chat_service.deepseek.chat = fake_chat
+        chat_service.llm.chat = fake_chat
 
         reply = chat_service.generate_reply("private:bilibili-tool", "B站UP主大东彦是谁")
 
@@ -308,7 +307,7 @@ class ChatToolBoundaryTests(unittest.TestCase):
                 return ChatResponse(tool_calls=tool_calls)
             return ChatResponse(content="根据搜索结果：DeepSeek 有新消息。")
 
-        chat_service.deepseek.chat = fake_chat
+        chat_service.llm.chat = fake_chat
         chat_service.search_web = lambda query: searched_queries.append(query) or "搜索结果：DeepSeek 发布新消息"
 
         reply = chat_service.generate_reply("private:tool-test", "DeepSeek 最新消息")

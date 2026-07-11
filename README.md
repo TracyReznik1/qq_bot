@@ -60,6 +60,12 @@ ATRI 监听 `http://127.0.0.1:5000/`，向 OneBot `http://127.0.0.1:3000` 发消
 
 在 NapCat / Lagrange 中将 HTTP 事件上报设为 `http://127.0.0.1:5000/`。
 
+## 桌面管理器进程控制
+
+- “停止 Bot”会先请求正常退出，超时后强制结束 Bot 核心进程。
+- “重启 Bot”只重启 Bot 核心，不会重启 NapCat 或改变 QQ 登录状态。
+- “退出 QQ 并停止 NapCat”用于切换账号：先调用 NapCat `/bot_exit`，再停止管理器内部启动的 NapCat；外部实例不会被强制结束。
+
 ## 模型 Fallback
 
 默认链路：Gemini 3.1 Flash-Lite → Gemma 4 26B → DeepSeek V4 Flash → DeepSeek V4 Pro

@@ -16,7 +16,6 @@ Remove-Item Env:QT_QPA_PLATFORM -ErrorAction SilentlyContinue
 if ($smokeExit -ne 0) { throw "GUI smoke test failed" }
 
 Write-Host "4. Cleaning up old builds..."
-if (Test-Path "release") { Remove-Item -Recurse -Force "release" }
 if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
 if (Test-Path "dist") { Remove-Item -Recurse -Force "dist" }
 
@@ -27,11 +26,18 @@ if ($LASTEXITCODE -ne 0) { throw "Deployment failed" }
 
 Write-Host "6. Organizing release folder..."
 $appName = "ATRIQQBot"
-$version = "0.1.0"
+$version = "0.1.12"
 $releaseDir = "release\${appName}-${version}-win-x64"
 
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
 Copy-Item -Recurse -Force "${appName}.dist\*" $releaseDir\
+
+if (Test-Path "$releaseDir\launcher.exe") {
+    if (Test-Path "$releaseDir\${appName}.exe") {
+        Remove-Item "$releaseDir\${appName}.exe" -Force
+    }
+    Rename-Item "$releaseDir\launcher.exe" "${appName}.exe" -Force
+}
 
 Write-Host "7. Verifying EXEs..."
 if (-not (Test-Path "$releaseDir\${appName}.exe")) {

@@ -22,12 +22,20 @@ def run_gui() -> int:
         settings_service, bot_service, memory_service, napcat_service
     )
     
+    from desktop_app.services.napcat_webui_service import NapCatWebUIService
+    from desktop_app.services.qq_login_service import QQLoginService
+    
+    webui_service = NapCatWebUIService()
+    qq_login_service = QQLoginService(napcat_service, webui_service)
+    
     services = {
         'settings': settings_service,
         'bot': bot_service,
         'napcat': napcat_service,
         'memory': memory_service,
-        'diagnostics': diagnostics_service
+        'diagnostics': diagnostics_service,
+        'webui': webui_service,
+        'qq_login': qq_login_service
     }
     
     window = MainWindow(services)

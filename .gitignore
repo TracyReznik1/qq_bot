@@ -36,3 +36,9 @@ release/
 *.zip
 *.exe
 *.spec.local
+nuitka-crash-report.xml
+capture_napcat.py
+smoke_test_gui.py
+test_pause.bat
+test_pause2.bat
+

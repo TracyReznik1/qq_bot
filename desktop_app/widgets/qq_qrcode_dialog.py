@@ -114,6 +114,8 @@ class QQQrCodeDialog(QDialog):
         self.reject()
         
     def on_login_success(self):
+        self.lbl_status.setText("QQ 登录成功")
+        QMessageBox.information(self, "QQ 登录", "QQ 登录成功。")
         self.accept()
         
     def on_login_failed(self, err):

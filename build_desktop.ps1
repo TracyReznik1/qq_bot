@@ -26,7 +26,7 @@ if ($LASTEXITCODE -ne 0) { throw "Deployment failed" }
 
 Write-Host "6. Organizing release folder..."
 $appName = "ATRIQQBot"
-$version = "0.1.12"
+$version = "0.1.13"
 $releaseDir = "release\${appName}-${version}-win-x64"
 
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null

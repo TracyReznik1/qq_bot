@@ -12,6 +12,7 @@ class DashboardPage(QWidget):
         self.diagnostics_service = diagnostics_service
         self.webui_service = webui_service
         self.qq_login_service = qq_login_service
+        self._bot_restart_busy = False
         
         layout = QVBoxLayout(self)
         
@@ -55,6 +56,8 @@ class DashboardPage(QWidget):
         
         # Connections
         self.bot_service.state_changed.connect(self.update_bot_status)
+        self.bot_service.restart_started.connect(self.on_restart_started)
+        self.bot_service.restart_finished.connect(self.on_restart_finished)
         self.napcat_service.state_changed.connect(self.update_napcat_status)
         
         self.qq_login_service.login_success.connect(self.on_login_success)
@@ -109,10 +112,31 @@ class DashboardPage(QWidget):
     def restart_bot(self):
         self.bot_service.restart()
 
+    def on_restart_started(self):
+        self._bot_restart_busy = True
+        self.lbl_bot.setText("Bot Status: Restarting")
+        self.btn_start_bot.setEnabled(False)
+        self.btn_stop_bot.setEnabled(False)
+        self.btn_restart_bot.setEnabled(False)
+
+    def on_restart_finished(self, success, message):
+        self._bot_restart_busy = False
+        self.update_bot_status("Running" if success else "Stopped")
+        if success:
+            QMessageBox.information(self, "Bot 重启", message)
+        else:
+            QMessageBox.warning(self, "Bot 重启", message)
+
     def set_logout_stop_busy(self, busy: bool):
         self.btn_stop_napcat.setEnabled(not busy)
 
     def update_bot_status(self, state: str):
+        if self._bot_restart_busy:
+            self.lbl_bot.setText("Bot Status: Restarting")
+            self.btn_start_bot.setEnabled(False)
+            self.btn_stop_bot.setEnabled(False)
+            self.btn_restart_bot.setEnabled(False)
+            return
         self.lbl_bot.setText(f"Bot Status: {state}")
         is_running = state in ["Running", "Starting"]
         self.btn_start_bot.setEnabled(not is_running)

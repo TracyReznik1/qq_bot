@@ -28,6 +28,12 @@ class QQLoginService(QObject):
         self.webui_service.login_status_error.connect(self._handle_status_error)
         self.webui_service.qrcode_result.connect(self._handle_qrcode_result)
         self.webui_service.qrcode_error.connect(self._handle_qrcode_error)
+        self.webui_service.quick_login_clear_result.connect(
+            self._handle_quick_login_clear_result
+        )
+        self.webui_service.quick_login_clear_error.connect(
+            self._handle_quick_login_clear_error
+        )
         
         # Listen to napcat log fallback
         self.napcat_service.qrcode_url_detected.connect(self._handle_fallback_url)
@@ -43,16 +49,19 @@ class QQLoginService(QObject):
         self._waiting_for_webui = False
         self._fallback_qr_url = None
         self._fallback_qr_file = None
+        self._cached_webui_url = ""
+        self._cached_webui_token = ""
         
         self._is_polling = False
         self._current_request_in_flight = False
         self._logout_stop_in_progress = False
-        self._pending_logout_ok = False
+        self._pending_quick_login_cleared = False
         self._waiting_for_napcat_stop = False
 
     def start_login_flow(self):
         self.status_updated.emit("正在启动 NapCat 和获取状态...")
         self._is_polling = True
+        self._setup_and_authenticate_webui()
         self.poll_timer.start()
         
         # If we already have a cached QR code, emit it immediately
@@ -79,7 +88,41 @@ class QQLoginService(QObject):
 
         self.cancel_login()
         self._logout_stop_in_progress = True
+        self._pending_quick_login_cleared = False
+        self._waiting_for_napcat_stop = False
         self.status_updated.emit("正在退出 QQ 并停止 NapCat...")
+
+        if self.webui_service.base_url:
+            self.webui_service.clear_quick_login()
+        else:
+            QTimer.singleShot(
+                0,
+                lambda: self._handle_quick_login_clear_error(
+                    "WebUI 地址尚未获取"
+                ),
+            )
+        return True
+
+    def _handle_quick_login_clear_result(self):
+        if not self._logout_stop_in_progress:
+            return
+        self._pending_quick_login_cleared = True
+        self._request_bot_exit_and_stop_napcat()
+
+    def _handle_quick_login_clear_error(self, _error):
+        if not self._logout_stop_in_progress:
+            return
+        self._pending_quick_login_cleared = False
+        self._request_bot_exit_and_stop_napcat()
+
+    def _request_bot_exit_and_stop_napcat(self):
+        self._submit_best_effort_bot_exit()
+        if self.napcat_service.stop():
+            self._waiting_for_napcat_stop = True
+            return
+        self._emit_logout_stop_result(stopped_internal=False)
+
+    def _submit_best_effort_bot_exit(self):
 
         base_url = self.napcat_service.settings_service.get(
             "ONEBOT_API_URL", "http://127.0.0.1:3000"
@@ -99,57 +142,55 @@ class QQLoginService(QObject):
             error_callback=self._logout_error_received.emit,
         )
         self.webui_service.thread_pool.start(task)
-        return True
 
     def _handle_logout_response(self, response):
-        try:
-            data = response.json()
-            logout_ok = (
-                response.status_code == 200
-                and data.get("status") == "ok"
-                and data.get("retcode") == 0
-            )
-        except Exception:
-            logout_ok = False
-        self._finish_logout_and_stop(logout_ok)
+        self.napcat_service.log_emitted.emit(
+            f"OneBot /bot_exit returned HTTP {response.status_code}."
+        )
 
     def _handle_logout_error(self, _error):
-        self._finish_logout_and_stop(False)
-
-    def _finish_logout_and_stop(self, logout_ok):
-        self._pending_logout_ok = logout_ok
-        if self.napcat_service.stop():
-            self._waiting_for_napcat_stop = True
-            return
-        self._emit_logout_stop_result(logout_ok, stopped_internal=False)
+        self.napcat_service.log_emitted.emit(
+            "OneBot /bot_exit connection closed before confirmation."
+        )
 
     def _handle_napcat_stop_completed(self, success, _message):
         if not self._waiting_for_napcat_stop:
             return
         self._waiting_for_napcat_stop = False
-        self._emit_logout_stop_result(
-            self._pending_logout_ok, stopped_internal=success
+        self._emit_logout_stop_result(stopped_internal=success)
+
+    def _emit_logout_stop_result(self, stopped_internal):
+        quick_login_cleared = self._pending_quick_login_cleared
+        self._logout_stop_in_progress = False
+        self._pending_quick_login_cleared = False
+        if quick_login_cleared and stopped_internal:
+            message = "QQ 快速登录已清除，内部 NapCat 已停止。"
+        elif quick_login_cleared:
+            message = "QQ 快速登录已清除，但没有可停止的内部 NapCat。"
+        elif stopped_internal:
+            message = "内部 NapCat 已停止，但快速登录账号未清除；下次启动可能仍会登录原账号。"
+        else:
+            message = "快速登录账号未清除，且没有可停止的内部 NapCat；下次启动可能仍会登录原账号。"
+        self.status_updated.emit(message)
+        self.logout_stop_finished.emit(
+            quick_login_cleared and stopped_internal, message
         )
 
-    def _emit_logout_stop_result(self, logout_ok, stopped_internal):
-        self._logout_stop_in_progress = False
-        self._pending_logout_ok = False
-        if logout_ok and stopped_internal:
-            message = "QQ 已退出，内部 NapCat 已停止。"
-        elif logout_ok:
-            message = "QQ 已退出；未停止外部启动的 NapCat。"
-        elif stopped_internal:
-            message = "内部 NapCat 已停止，但 QQ 退出状态未确认。"
-        else:
-            message = "QQ 退出失败，且没有可停止的内部 NapCat。"
-        self.status_updated.emit(message)
-        self.logout_stop_finished.emit(logout_ok, message)
-
     def _handle_webui_detected(self, url, token):
-        if self._is_polling and self._waiting_for_webui:
-            self._waiting_for_webui = False
-            self.webui_service.setup(url, token)
-            self.webui_service.authenticate()
+        self._cached_webui_url = url
+        self._cached_webui_token = token
+        if self._is_polling:
+            self._setup_and_authenticate_webui()
+
+    def _setup_and_authenticate_webui(self):
+        if not self._cached_webui_url:
+            return False
+        self._waiting_for_webui = False
+        self.webui_service.setup(
+            self._cached_webui_url, self._cached_webui_token
+        )
+        self.webui_service.authenticate()
+        return True
 
     def _poll_status(self):
         if not self._is_polling or self._current_request_in_flight:

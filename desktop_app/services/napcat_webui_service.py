@@ -38,6 +38,9 @@ class NapCatWebUIService(QObject):
     qrcode_result = Signal(str) # url
     qrcode_error = Signal(str)
 
+    quick_login_clear_result = Signal()
+    quick_login_clear_error = Signal(str)
+
     def __init__(self):
         super().__init__()
         self.base_url = ""
@@ -206,5 +209,60 @@ class NapCatWebUIService(QObject):
             headers=self._get_headers(),
             callback=on_success,
             error_callback=self.qrcode_error.emit
+        )
+        self.thread_pool.start(task)
+
+    def clear_quick_login(self, is_retry=False):
+        if not self.base_url:
+            self.quick_login_clear_error.emit("WebUI 地址尚未获取")
+            return
+
+        url = f"{self.base_url}/api/QQLogin/SetQuickLoginQQ"
+
+        def on_success(response):
+            if response.status_code in [401, 403]:
+                if is_retry:
+                    self.quick_login_clear_error.emit("WebUI 鉴权失败")
+                    return
+
+                def disconnect_retry_handlers():
+                    try:
+                        self.auth_success.disconnect(on_auth_success)
+                        self.auth_failed.disconnect(on_auth_failed)
+                    except RuntimeError:
+                        pass
+
+                def on_auth_success():
+                    disconnect_retry_handlers()
+                    self.clear_quick_login(is_retry=True)
+
+                def on_auth_failed(_error):
+                    disconnect_retry_handlers()
+                    self.quick_login_clear_error.emit("WebUI 重新鉴权失败")
+
+                self.auth_success.connect(on_auth_success)
+                self.auth_failed.connect(on_auth_failed)
+                self.authenticate()
+                return
+
+            try:
+                data = response.json()
+            except Exception:
+                self.quick_login_clear_error.emit("WebUI 返回了无效响应")
+                return
+
+            if response.status_code == 200 and data.get("code") == 0:
+                self.quick_login_clear_result.emit()
+            else:
+                self.quick_login_clear_error.emit(
+                    f"清除快速登录失败（HTTP {response.status_code}）"
+                )
+
+        task = WebUIRequestTask(
+            url=url,
+            headers=self._get_headers(),
+            json_data={"uin": ""},
+            callback=on_success,
+            error_callback=self.quick_login_clear_error.emit,
         )
         self.thread_pool.start(task)

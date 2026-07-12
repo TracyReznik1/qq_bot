@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $appName = "ATRIQQBot"
-$version = "0.1.12"
+$version = "0.1.13"
 $releaseDir = "release\${appName}-${version}-win-x64"
 
 Write-Host "Generating QUICK_START.txt..."

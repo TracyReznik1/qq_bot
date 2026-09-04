@@ -11,7 +11,7 @@
 - **💬 Conversational Context**: Guarantees FIFO session ordering, supports custom persona configurations (`config/persona.md`), and provides multi-turn history management.
 - **🌐 Automatic URL Direct-Reading**: Automatically detects HTTP/HTTPS URLs in user messages, fetches webpage content within a 5-second timeout, and injects it into an XML sandbox to summarize/answer, short-circuiting redundant web searches; prevents token bloating in persistent chat history.
 - **📺 Fast Bilibili Video Summaries & UP Creator Lookups**: Lightweight native extraction of Bilibili video metadata and CC/AI subtitle text via `/video <url/BV>` (aliases `/v`, `/bv`) and auto-inline chat links; instant structured profile cards and recent video lists via `/up <name or UID>` (alias `/biliup`) with optional LLM in-depth analysis. Pure native HTTP API with WBI signing, zero headless browser or Playwright overhead.
-- **🔍 Deterministic Grounded Search**: Tavily is the primary search provider, with seamless fallback to DDGS (DDGS stage timeout defaults to 15s). Normal chat is strictly locked to `LIGHT mode` (single query, replies do not expose source numbers, titles, or URLs), while explicit `/search` uses `STANDARD mode` (multi-query with source citations). Supports `/skip` to bypass web search entirely. Transparently handles network unavailability, insufficient evidence, and inconsistent premise/entity names with fixed boundary degradation, ensuring answers are grounded only on available evidence without hallucinating online sources. Automatically removes date filters and retries Tavily once if parameter range constraints are rejected. Search traces record audit metadata while stripping all sensitive content.
+- **🔍 Deterministic Grounded Search**: Tavily is the primary search provider, with seamless fallback to DDGS (DDGS stage timeout defaults to 15s). Normal chat is dynamically routed by a lightweight Retrieval Benefit router (SearchRouter, default `gemini-3.1-flash-lite`) strictly between instant no-search and `LIGHT mode` (single query, replies do not expose source numbers, titles, or URLs), skipping redundant query planning when topics are provided. Explicit `/search` enforces `STANDARD mode` (multi-query with source citations), while `/skip` strictly bypasses search. Transparently handles network unavailability, insufficient evidence, and inconsistent premise/entity names with fixed boundary degradation, ensuring answers are grounded only on available evidence without hallucinating online sources. Automatically removes date filters and retries Tavily once if parameter range constraints are rejected. Search traces record audit metadata while stripping all sensitive content.
 - **🛡️ Triple-Layer Prompt Injection Defense**:
   1. **XML Semantic Sandbox**: External webpage text is fully escaped with XML entities and encapsulated within `<external_webpage_content>` tags;
   2. **Authoritative Boundary Constraints**: System prompt enforces the highest security hierarchy, forbidding the model from executing any instructions or roleplay prompts contained in external web content;
@@ -111,6 +111,8 @@ All configurations are maintained in `.env` (`KEY=value` format, lines starting 
 | `DEEPSEEK_URL` | Optional | `https://api.deepseek.com/chat/completions` | API endpoint for DeepSeek chat completions. |
 | `TAVILY_API_KEY` | Optional | Empty | API Key for primary search provider Tavily; falls back to DDGS if unset or unavailable. |
 | `PROXY_URL` | Optional | Empty | Global HTTP/HTTPS proxy address, e.g. `http://127.0.0.1:7890`. |
+| `SEARCH_ROUTER_MODEL` | Optional | `gemini-3.1-flash-lite` | Search router model name for deciding whether external search is beneficial (SKIP or LIGHT mode). |
+| `SEARCH_ROUTER_TIMEOUT` | Optional | `5.0` | Timeout in seconds for search router decision stage. |
 | `SEARCH_MAX_RESULTS` | Optional | `4` | Maximum number of search documents returned per query. |
 | `SEARCH_PLANNER_TIMEOUT` | Optional | `8.0` | Timeout in seconds for search query planning. |
 | `SEARCH_TAVILY_TIMEOUT` | Optional | `8.0` | Timeout in seconds for Tavily query stage. |
@@ -129,7 +131,7 @@ All configurations are maintained in `.env` (`KEY=value` format, lines starting 
 
 ## Usage & Commands
 
-Messages not starting with `/` enter normal conversation. If a message contains an HTTP/HTTPS URL or a Bilibili video (link, short link, or BV/av ID), the bot will automatically direct-read the webpage content or video subtitles in a sandbox, short-circuiting search; general questions will trigger grounded web search in LIGHT mode as needed.
+Messages not starting with `/` enter ordinary conversation. If a message contains an HTTP/HTTPS URL or a Bilibili video (link, short link, or BV/av ID), the bot automatically fetches the full webpage content or video subtitles in an XML sandbox and summarizes it, short-circuiting search; otherwise, the Retrieval Benefit Search Router (default `gemini-3.1-flash-lite`) dynamically decides between instant response and LIGHT mode search (skipping redundant query planning); explicit `/search` enforces STANDARD mode, and `/skip` strictly bypasses search.
 
 | Command | Alias | Description |
 |---|---|---|
@@ -200,7 +202,7 @@ Ensure OneBot provides reachable image URLs, verify whether proxy settings affec
 ## Development & Testing
 
 ```powershell
-# Run full unit test suite (512 tests)
+# Run full unit test suite (560 tests)
 python -B -m unittest discover -s tests -t . -v
 
 # Syntax and compilation check

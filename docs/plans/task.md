@@ -5,3 +5,4 @@
 | video-command | Implement /video command and register in command system | completed |
 | video-chat-flow | Implement inline Bilibili video detection in chat flow | completed |
 | full-verification | Run full test suite regression and update documentation | completed |
+| wbi-fix | Fix fetch_bilibili_video signature and add WBI signing to bypass 412 | completed |

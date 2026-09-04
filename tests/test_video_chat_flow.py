@@ -105,6 +105,38 @@ class VideoChatFlowTests(unittest.TestCase):
     @patch("src.chat.chat_service.get_simple_search_pipeline_for_chat")
     @patch("src.chat.chat_service.fetch_document")
     @patch("src.chat.chat_service.fetch_bilibili_video")
+    def test_bilibili_url_with_adjoining_chinese_text_without_space(
+        self,
+        mock_fetch_video,
+        mock_fetch_doc,
+        mock_get_pipeline,
+    ):
+        mock_fetch_video.return_value = BilibiliVideoPayload(
+            ok=True,
+            status="success",
+            bvid="BV1kRt36GECc",
+            title="【Valorant】KC N4RRATE",
+            has_subtitles=False,
+            subtitles_text="",
+        )
+        fake_llm = MagicMock()
+        fake_llm.chat.return_value = ChatResponse(content="这是该视频的信息。")
+
+        with patch.object(chat_service, "llm", fake_llm):
+            reply = generate_reply(
+                "private:video_chat_user",
+                "https://www.bilibili.com/video/BV1kRt36GECc告诉我这个视频的信息",
+                mode=SearchMode.LIGHT,
+            )
+
+        self.assertEqual("这是该视频的信息。", reply)
+        mock_fetch_video.assert_called_once_with(bvid="BV1kRt36GECc", aid="")
+        mock_fetch_doc.assert_not_called()
+        mock_get_pipeline.assert_not_called()
+
+    @patch("src.chat.chat_service.get_simple_search_pipeline_for_chat")
+    @patch("src.chat.chat_service.fetch_document")
+    @patch("src.chat.chat_service.fetch_bilibili_video")
     def test_bilibili_fetch_failure_falls_through_to_standard_flow(
         self,
         mock_fetch_video,

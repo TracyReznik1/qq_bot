@@ -1,15 +1,32 @@
 import unittest
 from unittest import mock
 
+from src.services import video_service
 from src.services.video_service import (
     extract_bilibili_id,
     is_bilibili_video_url,
     fetch_bilibili_video,
+    sign_wbi_params,
     BilibiliVideoPayload,
 )
 
 
 class TestVideoService(unittest.TestCase):
+    def setUp(self):
+        video_service._cached_mixin_key = "ea1db124af3c281b47417b515f460577"
+        video_service._cached_mixin_key_expire = 9999999999.0
+
+    def tearDown(self):
+        video_service._cached_mixin_key = ""
+        video_service._cached_mixin_key_expire = 0.0
+
+    def test_sign_wbi_params(self):
+        params = {"bvid": "BV1xx411c7mD"}
+        signed = sign_wbi_params(params)
+        self.assertIn("wts", signed)
+        self.assertIn("w_rid", signed)
+        self.assertEqual(signed["bvid"], "BV1xx411c7mD")
+
     def test_extract_bilibili_id_direct_bv(self):
         bvid, aid = extract_bilibili_id("BV1xx411c7mD")
         self.assertEqual(bvid, "BV1xx411c7mD")
@@ -120,6 +137,32 @@ class TestVideoService(unittest.TestCase):
         self.assertFalse(payload.has_subtitles)
         self.assertEqual(payload.subtitles_text, "")
         self.assertEqual(payload.desc, "详细的简介内容，介绍了该视频的核心技术要点")
+
+    @mock.patch("src.services.video_service.try_proxied_get")
+    def test_fetch_bilibili_video_with_keyword_args(self, mock_get):
+        view_resp = mock.MagicMock()
+        view_resp.json.return_value = {
+            "code": 0,
+            "data": {
+                "bvid": "BV1xx411c7mD",
+                "aid": 123456,
+                "title": "测试关键字参数",
+                "desc": "简介",
+                "duration": 60,
+                "owner": {"name": "UP主"},
+                "pages": [{"cid": 111222, "part": ""}],
+            },
+        }
+        player_resp = mock.MagicMock()
+        player_resp.json.return_value = {
+            "code": 0,
+            "data": {"subtitle": {"subtitles": []}},
+        }
+        mock_get.side_effect = [view_resp, player_resp]
+
+        payload = fetch_bilibili_video(bvid="BV1xx411c7mD", aid="")
+        self.assertTrue(payload.ok)
+        self.assertEqual(payload.title, "测试关键字参数")
 
 
 if __name__ == "__main__":

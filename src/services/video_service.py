@@ -5,8 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime
+from functools import reduce
+from hashlib import md5
+from threading import Lock
+from typing import Any
 from urllib.parse import urlparse
 
 from src.config import config
@@ -14,13 +20,79 @@ from src.util import try_proxied_get
 
 logger = logging.getLogger("qq-bot")
 
-BILIBILI_VIEW_URL = "https://api.bilibili.com/x/web-interface/view"
-BILIBILI_PLAYER_URL = "https://api.bilibili.com/x/player/v2"
+BILIBILI_NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
+BILIBILI_VIEW_URL = "https://api.bilibili.com/x/web-interface/wbi/view"
+BILIBILI_PLAYER_URL = "https://api.bilibili.com/x/player/wbi/v2"
 
 BILIBILI_BV_ID_PATTERN = re.compile(r"(?i)(?<![0-9A-Za-z])BV[0-9A-Za-z]{10}(?![0-9A-Za-z])")
 BILIBILI_AV_ID_PATTERN = re.compile(r"(?i)(?<![0-9A-Za-z])av(\d+)(?![0-9A-Za-z])")
 BILIBILI_SHORT_LINK_PATTERN = re.compile(r"(?i)https?://b23\.tv/[^\s<>'\"]+")
 MAX_SUBTITLE_CHARS = 20000
+
+MIXIN_KEY_ENC_TAB = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
+    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
+    36, 20, 34, 44, 52
+]
+WBI_KEY_TTL_SECONDS = 3600.0
+_wbi_lock = Lock()
+_cached_mixin_key: str = ""
+_cached_mixin_key_expire: float = 0.0
+
+
+def _get_mixin_key(orig: str) -> str:
+    return reduce(lambda s, i: s + orig[i], MIXIN_KEY_ENC_TAB, "")[:32]
+
+
+def get_wbi_mixin_key() -> str:
+    global _cached_mixin_key, _cached_mixin_key_expire
+    now = time.time()
+    with _wbi_lock:
+        if _cached_mixin_key and now < _cached_mixin_key_expire:
+            return _cached_mixin_key
+
+    try:
+        resp = try_proxied_get(
+            BILIBILI_NAV_URL,
+            proxies=config.proxies,
+            timeout=getattr(config, "request_timeout", 8.0),
+            headers=_headers(),
+        )
+        data = resp.json()
+        if isinstance(data, dict) and data.get("code") == 0:
+            wbi_img = data.get("data", {}).get("wbi_img", {})
+            img_url = str(wbi_img.get("img_url") or "")
+            sub_url = str(wbi_img.get("sub_url") or "")
+            if img_url and sub_url:
+                img_key = img_url.rsplit("/", 1)[-1].split(".")[0]
+                sub_key = sub_url.rsplit("/", 1)[-1].split(".")[0]
+                new_mixin = _get_mixin_key(img_key + sub_key)
+                with _wbi_lock:
+                    _cached_mixin_key = new_mixin
+                    _cached_mixin_key_expire = now + WBI_KEY_TTL_SECONDS
+                return new_mixin
+    except Exception as exc:
+        logger.debug("Failed to fetch bilibili wbi keys: %s", exc)
+
+    with _wbi_lock:
+        if _cached_mixin_key:
+            return _cached_mixin_key
+    return "ea1db124af3c281b47417b515f460577"
+
+
+def sign_wbi_params(params: dict[str, Any]) -> dict[str, Any]:
+    mixin_key = get_wbi_mixin_key()
+    signed = dict(params)
+    signed["wts"] = round(time.time())
+    signed = dict(sorted(signed.items()))
+    filtered = {
+        k: "".join(filter(lambda c: c not in "!*'()", str(v)))
+        for k, v in signed.items()
+    }
+    query = urllib.parse.urlencode(filtered)
+    signed["w_rid"] = md5((query + mixin_key).encode("utf-8")).hexdigest()
+    return signed
 
 
 @dataclass(frozen=True)
@@ -169,8 +241,14 @@ def _download_subtitles(subtitle_url: str) -> str:
     return full_text
 
 
-def fetch_bilibili_video(url_or_text: str) -> BilibiliVideoPayload:
-    bvid, aid = extract_bilibili_id(url_or_text)
+def fetch_bilibili_video(
+    url_or_text: str = "",
+    *,
+    bvid: str = "",
+    aid: str = "",
+) -> BilibiliVideoPayload:
+    if not bvid and not aid:
+        bvid, aid = extract_bilibili_id(url_or_text)
     if not bvid and not aid:
         return BilibiliVideoPayload(
             ok=False,
@@ -178,12 +256,13 @@ def fetch_bilibili_video(url_or_text: str) -> BilibiliVideoPayload:
             error_message="未识别到有效的 B站 BV 号或 av 号。",
         )
 
-    # 1. Fetch View API
+    # 1. Fetch View API (with WBI signing)
     params = {"bvid": bvid} if bvid else {"aid": aid}
+    signed_params = sign_wbi_params(params)
     try:
         resp = try_proxied_get(
             BILIBILI_VIEW_URL,
-            params=params,
+            params=signed_params,
             proxies=config.proxies,
             timeout=getattr(config, "request_timeout", 10.0),
             headers=_headers(),
@@ -227,19 +306,20 @@ def fetch_bilibili_video(url_or_text: str) -> BilibiliVideoPayload:
     cid = first_page.get("cid") or data.get("cid")
     part_title = str(first_page.get("part") or "").strip()
 
-    # 2. Fetch Player V2 API for subtitles
+    # 2. Fetch Player V2 API for subtitles (with WBI signing)
     has_subtitles = False
     subtitles_text = ""
     if cid:
-        player_params = {"cid": cid}
+        player_params: dict[str, Any] = {"cid": cid}
         if real_bvid:
             player_params["bvid"] = real_bvid
         else:
             player_params["aid"] = real_aid
+        signed_player_params = sign_wbi_params(player_params)
         try:
             player_resp = try_proxied_get(
                 BILIBILI_PLAYER_URL,
-                params=player_params,
+                params=signed_player_params,
                 proxies=config.proxies,
                 timeout=getattr(config, "request_timeout", 10.0),
                 headers=_headers(),

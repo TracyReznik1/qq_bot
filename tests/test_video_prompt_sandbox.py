@@ -52,6 +52,16 @@ class TestVideoPromptSandbox(unittest.TestCase):
         self.assertIn("外部B站视频信息与字幕：", untrusted)
         self.assertIn(video_payload, untrusted)
 
+    def test_build_system_prompt_with_video_payload(self):
+        from src.chat.prompt import build_system_prompt
+
+        video_payload = '<external_bilibili_video bvid="BV1xx411c7mD" title="测试"></external_bilibili_video>'
+        prompt = build_system_prompt("private:123", video_payload=video_payload)
+        self.assertIn("<external_bilibili_video>", prompt)
+        self.assertNotIn("本次没有可用外部证据", prompt)
+        self.assertNotIn("也不能调用视频理解、天气、B站", prompt)
+        self.assertIn("严禁声称无法打开链接、无法查看视频或无法联网", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

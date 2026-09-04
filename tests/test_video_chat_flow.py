@@ -177,3 +177,29 @@ class VideoChatFlowTests(unittest.TestCase):
         mock_fetch_video.assert_called_once()
         # Because video fetch failed, fallback to doc fetch or search
         mock_fetch_doc.assert_called_once()
+
+    @patch("src.chat.chat_service.fetch_bilibili_video")
+    def test_video_chat_llm_exception_returns_video_failure_message(
+        self,
+        mock_fetch_video,
+    ):
+        mock_fetch_video.return_value = BilibiliVideoPayload(
+            ok=True,
+            status="success",
+            bvid="BV1xx411c7mD",
+            title="测试B站视频标题",
+            has_subtitles=False,
+            subtitles_text="",
+        )
+        fake_llm = MagicMock()
+        fake_llm.chat.side_effect = RuntimeError("LLM timeout")
+
+        with patch.object(chat_service, "llm", fake_llm):
+            reply = generate_reply(
+                "private:video_chat_user",
+                "BV1xx411c7mD 这个视频怎么样",
+                mode=SearchMode.LIGHT,
+            )
+
+        self.assertEqual("视频内容暂时无法读取或解析，请稍后再试。", reply)
+

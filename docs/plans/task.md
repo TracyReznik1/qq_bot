@@ -1,5 +1,6 @@
 | Task ID | Task Description | Status |
 |---|---|---|
-| bili-user-service | Implement Bilibili UP user search, card query and card formatter | completed |
-| bili-user-command | Implement /up and /biliup command routing with instant card and LLM query | completed |
-| full-verification-and-docs | Full regression test suite, compileall, and README documentation | completed |
+| diagnose-bili-issue | Inspect chat history and identify root causes of failed Bilibili video summary in group chat | completed |
+| fix-prompt-bili-support | Update system prompt to guide LLM on Bilibili video context and remove contradictory refusals | completed |
+| fix-chat-bili-degradation | Improve video fetch error handling and fallback messages in chat service | completed |
+| verify-fixes | Run full test suite and verify group chat Bilibili video flow | completed |

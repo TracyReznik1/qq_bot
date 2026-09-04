@@ -270,7 +270,14 @@ def _plain_reply(
 
     _ensure_history_loaded(mem_ctx.session_key)
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": build_system_prompt(mem_ctx)},
+        {
+            "role": "system",
+            "content": build_system_prompt(
+                mem_ctx,
+                webpage_payload=webpage_payload,
+                video_payload=video_payload,
+            ),
+        },
         {
             "role": "user",
             "content": build_untrusted_context(
@@ -310,13 +317,14 @@ def generate_reply(
     images = [img for img in (image_data_urls or []) if str(img or "").strip()]
 
     reply: str | None = None
+    video_payload = ""
+    webpage_payload = ""
     try:
         try:
             timeout = float(getattr(config, "search_answer_timeout", 20.0))
 
             # ── 聊天 B站视频 前置直读与注入 ──
             url = extract_first_url(normalized_text)
-            video_payload = ""
             if is_bilibili_video_url(normalized_text) or (url and is_bilibili_video_url(url)):
                 target_for_id = normalized_text if is_bilibili_video_url(normalized_text) else (url or "")
                 try:
@@ -358,7 +366,6 @@ def generate_reply(
                 return reply
 
             # ── 聊天 URL 前置自动直读与注入 ──
-            webpage_payload = ""
             if url:
                 try:
                     doc = fetch_document(url, timeout_seconds=5.0)
@@ -456,7 +463,14 @@ def generate_reply(
             return reply
         except Exception as exc:
             logger.warning("generate_reply failed (%s)", type(exc).__name__)
-            reply = "在线搜索暂时不可用，请稍后再试。"
+            if video_payload:
+                reply = "视频内容暂时无法读取或解析，请稍后再试。"
+            elif webpage_payload:
+                reply = "网页内容暂时无法读取或解析，请稍后再试。"
+            elif mode is SearchMode.SKIP:
+                reply = "服务暂时遇到一点问题，请稍后再试。"
+            else:
+                reply = "在线搜索暂时不可用，请稍后再试。"
             return reply
     finally:
         if reply is not None:

@@ -101,7 +101,7 @@ class ReadmeGuideTests(unittest.TestCase):
         )
 
     def test_readme_has_the_new_user_guide_entry_points(self):
-        self.assertEqual("# qqbot — qqbot_lite", self.readme.splitlines()[0])
+        self.assertEqual("# qqbot", self.readme.splitlines()[0])
 
         headings = set(re.findall(r"^## (.+?)\s*$", self.readme, flags=re.MULTILINE))
         required = {

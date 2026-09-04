@@ -49,7 +49,7 @@ class QqbotBrandingTests(unittest.TestCase):
         persona = (ROOT / "config" / "persona.md").read_text(encoding="utf-8")
         template = (ROOT / "config" / "persona.example.md").read_text(encoding="utf-8")
 
-        self.assertTrue(readme.startswith("# qqbot — qqbot_lite"))
+        self.assertTrue(readme.startswith("# qqbot"))
         self.assertNotIn("BOT_NAME", env_example)
         self.assertNotIn("BOT_PERSONA", env_example)
         self.assertIn("- 名字：ATRI", persona)

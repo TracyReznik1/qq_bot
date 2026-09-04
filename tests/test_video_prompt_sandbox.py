@@ -60,7 +60,8 @@ class TestVideoPromptSandbox(unittest.TestCase):
         self.assertIn("<external_bilibili_video>", prompt)
         self.assertNotIn("本次没有可用外部证据", prompt)
         self.assertNotIn("也不能调用视频理解、天气、B站", prompt)
-        self.assertIn("严禁声称无法打开链接、无法查看视频或无法联网", prompt)
+        self.assertNotIn("严禁声称无法打开链接", prompt)
+        self.assertIn("直接结合这些参考内容自然回答用户的相关问题", prompt)
 
 
 if __name__ == "__main__":

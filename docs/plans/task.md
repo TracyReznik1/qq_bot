@@ -1,6 +1,5 @@
 | Task ID | Task Description | Status |
 |---|---|---|
-| diagnose-bili-issue | Inspect chat history and identify root causes of failed Bilibili video summary in group chat | completed |
-| fix-prompt-bili-support | Update system prompt to guide LLM on Bilibili video context and remove contradictory refusals | completed |
-| fix-chat-bili-degradation | Improve video fetch error handling and fallback messages in chat service | completed |
-| verify-fixes | Run full test suite and verify group chat Bilibili video flow | completed |
+| clean-chat-system-prompts | Clean up build_system_prompt and build_search_system_prompt in src/chat/prompt.py | completed |
+| clean-secondary-prompts | Review and clean up any remaining secondary prompt strings if appropriate | completed |
+| run-full-test-suite | Run full regression test suite (550+ tests) to ensure all security/behavior contracts hold | completed |

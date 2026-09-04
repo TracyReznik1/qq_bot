@@ -58,6 +58,25 @@ def format_external_webpage_sandbox(
     )
 
 
+def format_bilibili_video_sandbox(payload: Any) -> str:
+    """Format Bilibili video metadata and subtitles into an escaped XML sandbox block."""
+    safe_bvid = escape_xml_text(str(getattr(payload, "bvid", "") or getattr(payload, "aid", "") or "").strip())
+    safe_title = escape_xml_text(str(getattr(payload, "title", "") or "").strip() or "无标题")
+    safe_owner = escape_xml_text(str(getattr(payload, "owner_name", "") or "").strip() or "未知UP主")
+    duration_sec = int(getattr(payload, "duration_seconds", 0) or 0)
+    safe_desc = escape_xml_text(str(getattr(payload, "desc", "") or "").strip() or "无简介")
+    has_sub = "true" if getattr(payload, "has_subtitles", False) else "false"
+    sub_text = str(getattr(payload, "subtitles_text", "") or "").strip()
+    safe_subs = escape_xml_text(sub_text) if sub_text else "（无可用官方字幕，需基于简介和元信息进行概括，并说明无字幕）"
+
+    return (
+        f'<external_bilibili_video bvid="{safe_bvid}" title="{safe_title}" owner="{safe_owner}" duration="{duration_sec}秒" has_subtitles="{has_sub}">\n'
+        f"<description>\n{safe_desc}\n</description>\n"
+        f"<subtitles>\n{safe_subs}\n</subtitles>\n"
+        f"</external_bilibili_video>"
+    )
+
+
 def build_untrusted_context(
     context: MemoryContext | str,
     query: str = "",
@@ -65,6 +84,7 @@ def build_untrusted_context(
     evidence_payload: str = "",
     include_memories: bool = True,
     webpage_payload: str = "",
+    video_payload: str = "",
 ) -> str:
     ctx = _ensure_context(context)
     retrieved = []
@@ -76,6 +96,7 @@ def build_untrusted_context(
     formatted_memories = format_memory_context(retrieved) if include_memories else "（本回答不使用已检索记忆）"
     ext_context = evidence_payload.strip() or "暂无"
     web_section = f"\n外部网页正文：\n{webpage_payload.strip()}\n" if webpage_payload.strip() else ""
+    video_section = f"\n外部B站视频信息与字幕：\n{video_payload.strip()}\n" if video_payload.strip() else ""
 
     return (
         "[非可信上下文]\n"
@@ -85,6 +106,7 @@ def build_untrusted_context(
         f"记忆：\n{formatted_memories}\n"
         f"外部证据：\n{ext_context}\n"
         f"{web_section}"
+        f"{video_section}"
         "[/非可信上下文]"
     )
 

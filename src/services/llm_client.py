@@ -14,6 +14,7 @@ dumping a raw traceback into the QQ chat.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 import requests
@@ -47,6 +48,23 @@ def _model_supports_tools(provider: str, model_name: str) -> bool:
 _FALLBACK_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
+class ImageRecognitionUnavailable(RuntimeError):
+    """Raised after every configured model fails a request with images."""
+
+
+def _messages_have_images(messages: list[dict[str, Any]]) -> bool:
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        if any(
+            isinstance(item, dict) and item.get("type") == "image_url"
+            for item in content
+        ):
+            return True
+    return False
+
+
 def _is_retryable_error(exc: BaseException) -> bool:
     """Return True when *exc* signals a transient failure worth retrying."""
     if isinstance(exc, requests.HTTPError):
@@ -55,6 +73,31 @@ def _is_retryable_error(exc: BaseException) -> bool:
         )
         return status in _FALLBACK_HTTP_STATUSES
     return isinstance(exc, (requests.ConnectionError, requests.Timeout))
+
+
+def _tool_affinity(
+    messages: list[dict[str, Any]],
+) -> tuple[str, str] | None:
+    for message in reversed(messages):
+        if (
+            not isinstance(message, dict)
+            or message.get("role") != "assistant"
+            or not message.get("tool_calls")
+        ):
+            continue
+        context = message.get("_provider_context")
+        if not isinstance(context, dict):
+            continue
+        provider = context.get("provider")
+        model = context.get("model")
+        if (
+            isinstance(provider, str)
+            and provider
+            and isinstance(model, str)
+            and model
+        ):
+            return provider, model
+    return None
 
 
 class FallbackLLMClient:
@@ -67,8 +110,18 @@ class FallbackLLMClient:
         sequence.
     """
 
-    def __init__(self, chain: list[LLMModelSpec]) -> None:
+    def __init__(
+        self,
+        chain: list[LLMModelSpec],
+        cfg: Config | None = None,
+        *,
+        gemini_api_key: str | None = None,
+        deepseek_api_key: str | None = None,
+    ) -> None:
         self._chain = chain
+        self._cfg = cfg or config
+        self._gemini_api_key = gemini_api_key.strip() if gemini_api_key else None
+        self._deepseek_api_key = deepseek_api_key.strip() if deepseek_api_key else None
         self._clients: dict[str, DeepSeekClient | GeminiClient] = {}
 
     # ── public API ──────────────────────────────────────────────────
@@ -81,10 +134,16 @@ class FallbackLLMClient:
         max_tokens: int | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        timeout_seconds: float | None = None,
     ) -> ChatResponse:
         has_tools = bool(tools)
+        contains_images = _messages_have_images(messages)
+        affinity = _tool_affinity(messages)
 
+        started = time.monotonic()
         for spec in self._chain:
+            if affinity is not None and affinity != (spec.provider, spec.model):
+                continue
             if has_tools and not spec.supports_tools:
                 logger.info(
                     "LLM skipping model (no tool support) provider=%s model=%s",
@@ -96,6 +155,11 @@ class FallbackLLMClient:
             client = self._get_client(spec)
 
             try:
+                remaining = timeout_seconds
+                if timeout_seconds is not None:
+                    remaining = max(timeout_seconds - (time.monotonic() - started), 0.0)
+                    if remaining <= 0:
+                        raise TimeoutError("LLM deadline expired")
                 result = client.chat(
                     messages,
                     model=spec.model,
@@ -103,6 +167,7 @@ class FallbackLLMClient:
                     max_tokens=max_tokens,
                     tools=tools,
                     tool_choice=tool_choice,
+                    timeout_seconds=remaining,
                 )
                 # Guard against responses that are structurally broken:
                 # content is empty AND tool_calls is empty → treat as failure.
@@ -114,38 +179,44 @@ class FallbackLLMClient:
                     )
                     continue
 
+                if result.tool_calls:
+                    result.provider_context = {
+                        **(result.provider_context or {}),
+                        "provider": spec.provider,
+                        "model": spec.model,
+                    }
                 return result
             except RuntimeError as exc:
                 # Missing API key → do NOT retry; log and skip this model.
                 logger.warning(
-                    "LLM config error provider=%s model=%s: %s",
+                    "LLM config error provider=%s model=%s error_type=%s",
                     spec.provider,
                     spec.model,
-                    exc,
+                    type(exc).__name__,
                 )
                 continue
             except Exception as exc:
                 if _is_retryable_error(exc):
                     logger.warning(
-                        "LLM call failed provider=%s model=%s reason=%s — trying next fallback",
+                        "LLM call failed provider=%s model=%s error_type=%s — trying next fallback",
                         spec.provider,
                         spec.model,
-                        exc,
+                        type(exc).__name__,
                     )
                     continue
                 # For unexpected errors, log and continue (don't crash the bot).
                 logger.warning(
-                    "LLM call failed (non-retryable) provider=%s model=%s reason=%s",
+                    "LLM call failed (non-retryable) provider=%s model=%s error_type=%s",
                     spec.provider,
                     spec.model,
-                    exc,
+                    type(exc).__name__,
                 )
                 continue
 
         # All models exhausted
-        raise RuntimeError(
-            "所有模型暂时不可用，请稍后再试。"
-        )
+        if contains_images:
+            raise ImageRecognitionUnavailable("当前模型无法识别该图片。")
+        raise RuntimeError("所有模型暂时不可用，请稍后再试。")
 
     # ── helpers ─────────────────────────────────────────────────────
 
@@ -153,9 +224,15 @@ class FallbackLLMClient:
         key = f"{spec.provider}:{spec.model}"
         if key not in self._clients:
             if spec.provider == "deepseek":
-                self._clients[key] = DeepSeekClient(config)
+                self._clients[key] = DeepSeekClient(
+                    self._cfg,
+                    api_key=self._deepseek_api_key,
+                )
             elif spec.provider == "gemini":
-                self._clients[key] = GeminiClient(config)
+                self._clients[key] = GeminiClient(
+                    self._cfg,
+                    api_key=self._gemini_api_key,
+                )
             else:
                 raise RuntimeError(
                     f"Unknown LLM provider: {spec.provider}"
@@ -165,68 +242,61 @@ class FallbackLLMClient:
 
 # ── chain builder ──────────────────────────────────────────────────────
 
-def _build_chain(cfg=None) -> list[LLMModelSpec]:
-    """Build the ordered model chain from ``Config``."""
+def _build_chain(cfg=None, models=None) -> list[LLMModelSpec]:
+    """Build the exact ordered chain validated by Config."""
     if cfg is None:
         cfg = config
-    chain: list[LLMModelSpec] = []
-
-    # Primary
-    primary_model = cfg.llm_primary_model
-    if not primary_model:
-        if cfg.llm_primary_provider == "gemini":
-            primary_model = cfg.gemini_model
-        elif cfg.llm_primary_provider == "deepseek":
-            primary_model = cfg.deepseek_model
-        else:
-            primary_model = cfg.gemini_model
-    chain.append(
+    selected = tuple(models or cfg.chat_models)
+    return [
         LLMModelSpec(
-            provider=cfg.llm_primary_provider,
-            model=primary_model,
+            provider=item.provider,
+            model=item.model,
             supports_tools=_model_supports_tools(
-                cfg.llm_primary_provider, primary_model
+                item.provider,
+                item.model,
             ),
         )
-    )
-
-    # Fallback slots — only add when provider is non-empty
-    for fb_provider_attr, fb_model_attr in (
-        ("llm_fallback_1_provider", "llm_fallback_1_model"),
-        ("llm_fallback_2_provider", "llm_fallback_2_model"),
-        ("llm_fallback_3_provider", "llm_fallback_3_model"),
-    ):
-        provider = getattr(cfg, fb_provider_attr, "").strip()
-        model_name = getattr(cfg, fb_model_attr, "").strip()
-        if not provider:
-            continue
-        chain.append(
-            LLMModelSpec(
-                provider=provider,
-                model=model_name,
-                supports_tools=_model_supports_tools(provider, model_name),
-            )
-        )
-
-    # Deduplicate while preserving order
-    seen: set[tuple[str, str]] = set()
-    deduped: list[LLMModelSpec] = []
-    for spec in chain:
-        key = (spec.provider, spec.model)
-        if key not in seen:
-            seen.add(key)
-            deduped.append(spec)
-    return deduped
+        for item in selected
+    ]
 
 
 # ── singleton accessor ─────────────────────────────────────────────────
 
 _llm_client: FallbackLLMClient | None = None
+_memory_llm_client: FallbackLLMClient | None = None
 
 
 def get_llm_client() -> FallbackLLMClient:
     """Return the singleton ``FallbackLLMClient`` built from config."""
     global _llm_client
     if _llm_client is None:
-        _llm_client = FallbackLLMClient(_build_chain())
+        _llm_client = FallbackLLMClient(
+            _build_chain(),
+            cfg=config,
+            gemini_api_key=getattr(config, "gemini_api_key", None),
+            deepseek_api_key=getattr(config, "deepseek_api_key", None),
+        )
     return _llm_client
+
+
+def get_memory_llm_client() -> FallbackLLMClient:
+    """Return the memory-extraction client with its own fallback chain."""
+    global _memory_llm_client
+    if _memory_llm_client is None:
+        memory_gemini_key = getattr(
+            config,
+            "memory_gemini_api_key",
+            None,
+        ) or getattr(config, "gemini_api_key", None)
+        memory_deepseek_key = getattr(
+            config,
+            "memory_deepseek_api_key",
+            None,
+        ) or getattr(config, "deepseek_api_key", None)
+        _memory_llm_client = FallbackLLMClient(
+            _build_chain(models=config.memory_models),
+            cfg=config,
+            gemini_api_key=memory_gemini_key,
+            deepseek_api_key=memory_deepseek_key,
+        )
+    return _memory_llm_client

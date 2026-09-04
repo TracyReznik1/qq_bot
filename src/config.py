@@ -1,12 +1,24 @@
+import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 
+from src.model_config import (
+    ConfiguredModel,
+    parse_model_chain,
+    parse_chat_models,
+    validate_model_configuration,
+)
+
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
+
+
+DEFAULT_DATA_DIR_NAME = "qqbot_data"
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -45,45 +57,91 @@ def resolve_path(value: str, default: str) -> Path:
 
 @dataclass(frozen=True)
 class Config:
-    bot_name: str = os.getenv("BOT_NAME", "ATRI")
-    bot_persona: str = os.getenv(
-        "BOT_PERSONA",
-        "你是 ATRI，一个 QQ 聊天机器人。说话自然、可爱、有一点吐槽感，但要友好、简洁、靠谱。",
+    persona_path: Path = field(default_factory=lambda: BASE_DIR / "config" / "persona.md")
+    # ── Gemini / Google AI Studio native API ──
+    gemini_api_key: str = field(
+        default_factory=lambda: os.getenv("GEMINI_API_KEY", "").strip()
     )
-    # ── Gemini / Google AI Studio ──
-    gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
-    gemini_url: str = os.getenv(
-        "GEMINI_URL",
-        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    gemini_url: str = field(
+        default_factory=lambda: os.getenv(
+            "GEMINI_URL",
+            "https://generativelanguage.googleapis.com/v1",
+        ).rstrip("/")
     )
 
     # ── DeepSeek ──
-    deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
-    deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
-    deepseek_url: str = os.getenv(
-        "DEEPSEEK_URL", "https://api.deepseek.com/chat/completions"
+    deepseek_api_key: str = field(
+        default_factory=lambda: os.getenv("DEEPSEEK_API_KEY", "").strip()
+    )
+    deepseek_url: str = field(
+        default_factory=lambda: os.getenv(
+            "DEEPSEEK_URL",
+            "https://api.deepseek.com/chat/completions",
+        ).strip()
     )
 
-    # Not yet used; reserved for media pipeline
-    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    # ── Dedicated Memory Extraction Keys (Optional, fallback to primary keys) ──
+    memory_gemini_api_key: str = field(
+        default_factory=lambda: os.getenv("MEMORY_GEMINI_API_KEY", "").strip()
+    )
+    memory_deepseek_api_key: str = field(
+        default_factory=lambda: os.getenv("MEMORY_DEEPSEEK_API_KEY", "").strip()
+    )
 
-    # ── LLM provider chain ──
-    # Backward compatibility: LLM_PROVIDER=deepseek  →  primary = deepseek
-    # If LLM_PROVIDER is set (non-empty), it overrides LLM_PRIMARY_PROVIDER.
-    _llm_provider_compat: str = os.getenv("LLM_PROVIDER", "").strip().lower()
-    llm_primary_provider: str = os.getenv(
-        "LLM_PRIMARY_PROVIDER",
-        _llm_provider_compat if _llm_provider_compat else "gemini",
-    ).strip().lower()
-    llm_primary_model: str = os.getenv("LLM_PRIMARY_MODEL", "").strip()
+    _chat_models_raw: str = field(
+        default_factory=lambda: os.getenv("CHAT_MODELS", ""),
+        repr=False,
+    )
+    _memory_models_raw: str = field(
+        default_factory=lambda: os.getenv("MEMORY_MODELS", ""),
+        repr=False,
+    )
+    chat_models: tuple[ConfiguredModel, ...] = field(init=False)
+    memory_models: tuple[ConfiguredModel, ...] = field(init=False)
 
-    llm_fallback_1_provider: str = os.getenv("LLM_FALLBACK_1_PROVIDER", "gemini").strip().lower()
-    llm_fallback_1_model: str = os.getenv("LLM_FALLBACK_1_MODEL", "gemma-4-26b-a4b-it").strip()
-    llm_fallback_2_provider: str = os.getenv("LLM_FALLBACK_2_PROVIDER", "deepseek").strip().lower()
-    llm_fallback_2_model: str = os.getenv("LLM_FALLBACK_2_MODEL", "deepseek-v4-flash").strip()
-    llm_fallback_3_provider: str = os.getenv("LLM_FALLBACK_3_PROVIDER", "deepseek").strip().lower()
-    llm_fallback_3_model: str = os.getenv("LLM_FALLBACK_3_MODEL", "deepseek-v4-pro").strip()
+    def __post_init__(self) -> None:
+        chat_models = parse_chat_models(self._chat_models_raw)
+        provider_api_keys = {
+            "gemini": self.gemini_api_key,
+            "deepseek": self.deepseek_api_key,
+        }
+        validate_model_configuration(
+            chat_models,
+            provider_api_keys=provider_api_keys,
+            gemini_url=self.gemini_url,
+        )
+        memory_provider_api_keys = {
+            "gemini": self.memory_gemini_api_key or self.gemini_api_key,
+            "deepseek": self.memory_deepseek_api_key or self.deepseek_api_key,
+        }
+        if str(self._memory_models_raw or "").strip():
+            memory_models = parse_model_chain(
+                self._memory_models_raw,
+                "MEMORY_MODELS",
+            )
+            validate_model_configuration(
+                memory_models,
+                provider_api_keys=memory_provider_api_keys,
+                gemini_url=self.gemini_url,
+                setting_name="MEMORY_MODELS",
+            )
+        else:
+            memory_models = chat_models
+        object.__setattr__(self, "chat_models", chat_models)
+        object.__setattr__(self, "memory_models", memory_models)
+        object.__setattr__(self, "search_max_results", max(int(self.search_max_results), 1))
+        for field_name in (
+            "search_planner_timeout",
+            "search_tavily_timeout",
+            "search_ddgs_timeout",
+            "search_reader_timeout",
+            "search_ranker_timeout",
+            "search_answer_timeout",
+        ):
+            timeout = float(getattr(self, field_name))
+            if not math.isfinite(timeout):
+                timeout = 0.1
+            object.__setattr__(self, field_name, max(timeout, 0.1))
     onebot_url: str = os.getenv("ONEBOT_API_URL", "http://127.0.0.1:3000").rstrip("/")
     onebot_access_token: str = os.getenv("ONEBOT_ACCESS_TOKEN", "")
     callback_secret: str = os.getenv("CALLBACK_SECRET", "")
@@ -93,68 +151,29 @@ class Config:
     port: int = env_int("BOT_PORT", 5000)
     require_group_at: bool = env_bool("REQUIRE_GROUP_AT", True)
     admin_qq_ids: frozenset[str] = env_csv_set("ADMIN_QQ_IDS")
-    data_dir: Path = resolve_path(os.getenv("DATA_DIR", ""), "atri_data")
+    data_dir: Path = field(
+        default_factory=lambda: resolve_path(
+            os.getenv("DATA_DIR", ""),
+            DEFAULT_DATA_DIR_NAME,
+        )
+    )
+
+    @property
+    def memory_database_path(self) -> Path:
+        return self.data_dir / "memory.sqlite3"
+
     search_max_results: int = env_int("SEARCH_MAX_RESULTS", 4)
-    video_enable_media_pipeline: bool = env_bool("VIDEO_ENABLE_MEDIA_PIPELINE", False)
-    video_max_download_mb: int = env_int("VIDEO_MAX_DOWNLOAD_MB", 50)
-    video_max_seconds: int = env_int("VIDEO_MAX_SECONDS", 600)
+    search_planner_timeout: float = env_float("SEARCH_PLANNER_TIMEOUT", 8.0)
+    search_tavily_timeout: float = env_float("SEARCH_TAVILY_TIMEOUT", 8.0)
+    search_ddgs_timeout: float = env_float("SEARCH_DDGS_TIMEOUT", 15.0)
+    search_reader_timeout: float = env_float("SEARCH_READER_TIMEOUT", 5.0)
+    search_ranker_timeout: float = env_float("SEARCH_RANKER_TIMEOUT", 10.0)
+    search_answer_timeout: float = env_float("SEARCH_ANSWER_TIMEOUT", 20.0)
     history_turns: int = env_int("HISTORY_TURNS", 8)
-    memory_limit: int = env_int("MEMORY_LIMIT", 30)
-    message_workers: int = env_int("MESSAGE_WORKERS", 8)
-    message_queue_max_size: int = env_int("MESSAGE_QUEUE_MAX_SIZE", 100)
     persist_history: bool = env_bool("PERSIST_HISTORY", True)
+    message_workers: int = field(default_factory=lambda: max(env_int("MESSAGE_WORKERS", 8), 1))
     request_timeout: float = env_float("REQUEST_TIMEOUT", 18.0)
     max_reply_chars: int = env_int("MAX_REPLY_CHARS", 1700)
-
-    # ── Local ComfyUI Image Generation ──
-    image_enable: bool = env_bool("IMAGE_ENABLE", False)
-    image_chat_tool_enable: bool = env_bool("IMAGE_CHAT_TOOL_ENABLE", False)
-    image_admin_only: bool = env_bool("IMAGE_ADMIN_ONLY", True)
-
-    comfyui_base_url: str = os.getenv("COMFYUI_BASE_URL", "http://127.0.0.1:8188").rstrip("/")
-    comfyui_timeout_seconds: int = env_int("COMFYUI_TIMEOUT_SECONDS", 600)
-    comfyui_client_id: str = os.getenv("COMFYUI_CLIENT_ID", "atri-qq-bot")
-
-    image_project_dir: str = os.getenv("IMAGE_PROJECT_DIR", "")
-    comfyui_workflow_api_path: str = os.getenv("COMFYUI_WORKFLOW_API_PATH", "")
-    image_default_preset: str = os.getenv("IMAGE_DEFAULT_PRESET", "highres_output")
-    image_fallback_preset: str = os.getenv("IMAGE_FALLBACK_PRESET", "final_output")
-    image_output_dir: str = os.getenv("IMAGE_OUTPUT_DIR", "atri_data/generated_images")
-    image_max_batch_size: int = env_int("IMAGE_MAX_BATCH_SIZE", 1)
-    image_single_task_lock: bool = env_bool("IMAGE_SINGLE_TASK_LOCK", True)
-
-    image_use_character_lora: bool = env_bool("IMAGE_USE_CHARACTER_LORA", False)
-    image_character_lora_name: str = os.getenv("IMAGE_CHARACTER_LORA_NAME", "")
-    image_character_lora_strength: float = env_float("IMAGE_CHARACTER_LORA_STRENGTH", 0.0)
-
-    image_use_style_lora: bool = env_bool("IMAGE_USE_STYLE_LORA", False)
-    image_style_lora_name: str = os.getenv("IMAGE_STYLE_LORA_NAME", "")
-    image_style_lora_strength: float = env_float("IMAGE_STYLE_LORA_STRENGTH", 0.0)
-
-    # ── Image Search (/pic) ──
-    image_search_enable: bool = env_bool("IMAGE_SEARCH_ENABLE", False)
-    image_search_provider: str = os.getenv("IMAGE_SEARCH_PROVIDER", "tavily").strip().lower()
-    image_search_max_results: int = env_int("IMAGE_SEARCH_MAX_RESULTS", 5)
-    image_search_send_max: int = env_int("IMAGE_SEARCH_SEND_MAX", 3)
-    image_search_cache_dir: str = os.getenv("IMAGE_SEARCH_CACHE_DIR", "atri_data/image_search_cache")
-    image_search_max_download_mb: int = env_int("IMAGE_SEARCH_MAX_DOWNLOAD_MB", 8)
-
-    # ── Image Send (base64 fallback) ──
-    image_send_base64_fallback: bool = env_bool("IMAGE_SEND_BASE64_FALLBACK", True)
-    image_send_base64_max_mb: int = env_int("IMAGE_SEND_BASE64_MAX_MB", 8)
-
-    # Optional ComfyUI node ID overrides (leave empty for auto-detection)
-    comfyui_positive_node_id: str = os.getenv("COMFYUI_POSITIVE_NODE_ID", "").strip()
-    comfyui_negative_node_id: str = os.getenv("COMFYUI_NEGATIVE_NODE_ID", "").strip()
-    comfyui_preset_node_id: str = os.getenv("COMFYUI_PRESET_NODE_ID", "").strip()
-    comfyui_seed_node_id: str = os.getenv("COMFYUI_SEED_NODE_ID", "").strip()
-    comfyui_width_node_id: str = os.getenv("COMFYUI_WIDTH_NODE_ID", "").strip()
-    comfyui_height_node_id: str = os.getenv("COMFYUI_HEIGHT_NODE_ID", "").strip()
-    comfyui_steps_node_id: str = os.getenv("COMFYUI_STEPS_NODE_ID", "").strip()
-    comfyui_cfg_node_id: str = os.getenv("COMFYUI_CFG_NODE_ID", "").strip()
-    comfyui_character_lora_node_id: str = os.getenv("COMFYUI_CHARACTER_LORA_NODE_ID", "").strip()
-    comfyui_style_lora_node_id: str = os.getenv("COMFYUI_STYLE_LORA_NODE_ID", "").strip()
-    comfyui_save_prefix_node_id: str = os.getenv("COMFYUI_SAVE_PREFIX_NODE_ID", "").strip()
 
     @property
     def proxies(self) -> dict[str, str] | None:

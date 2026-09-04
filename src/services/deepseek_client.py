@@ -14,9 +14,45 @@ from src.util import try_proxied_post
 logger = logging.getLogger("qq-bot")
 
 
+def _clean_messages(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    for message in messages:
+        clean_message = {
+            key: value
+            for key, value in message.items()
+            if key != "_provider_context"
+        }
+        if (
+            message.get("role") == "assistant"
+            and message.get("tool_calls")
+            and clean_message.get("content") is None
+        ):
+            clean_message["content"] = ""
+        provider_context = message.get("_provider_context")
+        if (
+            message.get("role") == "assistant"
+            and isinstance(provider_context, dict)
+            and provider_context.get("provider") == "deepseek"
+        ):
+            reasoning_content = provider_context.get(
+                "reasoning_content"
+            )
+            if isinstance(reasoning_content, str):
+                clean_message["reasoning_content"] = reasoning_content
+        cleaned.append(clean_message)
+    return cleaned
+
+
 class DeepSeekClient:
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: Config, api_key: str | None = None) -> None:
         self._cfg = cfg
+        self._api_key = api_key.strip() if api_key else None
+
+    @property
+    def api_key(self) -> str:
+        return self._api_key or self._cfg.deepseek_api_key
 
     def chat(
         self,
@@ -27,31 +63,36 @@ class DeepSeekClient:
         max_tokens: int | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        timeout_seconds: float | None = None,
     ) -> ChatResponse:
-        if not self._cfg.deepseek_api_key:
+        api_key = self.api_key
+        if not api_key:
             raise RuntimeError("DEEPSEEK_API_KEY is not configured")
-
+        model_name = str(model or "").strip()
+        if not model_name:
+            raise RuntimeError("DeepSeek model is not configured")
+        clean_messages = _clean_messages(messages)
         payload: dict[str, Any] = {
-            "model": model or self._cfg.deepseek_model,
-            "messages": messages,
+            "model": model_name,
+            "messages": clean_messages,
             "temperature": temperature,
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
-        if tools is not None:
+        if tools and tool_choice != "none":
             payload["tools"] = tools
-        if tool_choice is not None:
-            payload["tool_choice"] = tool_choice
 
         response = try_proxied_post(
             self._cfg.deepseek_url,
             proxies=self._cfg.proxies,
             json=payload,
             headers={
-                "Authorization": f"Bearer {self._cfg.deepseek_api_key}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
-            timeout=self._cfg.request_timeout,
+            timeout=min(self._cfg.request_timeout, timeout_seconds)
+            if timeout_seconds is not None
+            else self._cfg.request_timeout,
         )
         response.raise_for_status()
         data = response.json()
@@ -59,8 +100,16 @@ class DeepSeekClient:
         raw_tool_calls = message.get("tool_calls") or []
         if not isinstance(raw_tool_calls, list):
             raw_tool_calls = []
+        reasoning_content = message.get("reasoning_content")
+        provider_context = None
+        if raw_tool_calls and isinstance(reasoning_content, str):
+            provider_context = {
+                "provider": "deepseek",
+                "reasoning_content": reasoning_content,
+            }
 
         return ChatResponse(
             content=(message.get("content") or "").strip(),
             tool_calls=raw_tool_calls,
+            provider_context=provider_context,
         )

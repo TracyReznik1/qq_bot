@@ -1,46 +1,103 @@
 import hmac
 import logging
+import re
 import time
+from threading import Lock
 from typing import Any
 
 from flask import Flask, request
 
-from src.chat.chat_service import generate_reply
-from src.chat.memory import migrate_legacy_memory_files
+from src.chat.chat_service import generate_reply, get_recent_dialogue_context
 from src.commands import CommandContext, handle_command
-from src.config import config
+from src.commands.renderer import PersonaCommandRenderer
+from src.config import BASE_DIR, config
+from src.persona import PersonaConfigurationError, get_persona
+from src.search.simple.models import SearchMode
+
 from src.messaging import (
     MessageQueue,
     enqueue_message,
+    get_event_memory_scope_key,
     get_event_session_key,
     mark_message_seen,
 )
+from src.memory.models import MemoryContext, MemoryEvent
+from src.memory.service import get_memory_service
 from src.router import route_message
+from src.services.image_input_service import (
+    ImageInputError,
+    load_chat_images,
+    parse_image_message,
+)
+from src.services.llm_client import ImageRecognitionUnavailable
+from src.services.llm_client import get_llm_client
 from src.services.onebot_client import OneBotClient
+from src.utils.data_migration import LEGACY_DATA_DIR_NAME, migrate_legacy_data
 
 
 app = Flask(__name__)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("qq-bot")
+CALLBACK_SECRET_HEADER = "X-QQBOT-Callback-Secret"
+LEGACY_CALLBACK_SECRET_HEADER = "X-ATRI-Callback-Secret"
 
 MAX_PROCESSED_MESSAGE_IDS = 500
 _startup_initialized = False
+_startup_lock = Lock()
 
 onebot = OneBotClient(config)
+command_renderer = PersonaCommandRenderer(model=get_llm_client())
+
+
+def _register_pending_memory_sequence(data: dict[str, Any]) -> None:
+    scope_key = get_event_memory_scope_key(data)
+    sequence = int(data.get("_qqbot_sequence") or 0)
+    if scope_key and sequence > 0:
+        get_memory_service().register_pending_sequence(scope_key, sequence)
+
+
+def _clear_pending_memory_sequence(data: dict[str, Any]) -> None:
+    scope_key = get_event_memory_scope_key(data)
+    sequence = int(data.get("_qqbot_sequence") or 0)
+    if scope_key and sequence > 0:
+        get_memory_service().clear_pending_sequence(scope_key, sequence)
+
 
 message_queue = MessageQueue(
     max_workers=config.message_workers,
     max_processed_message_ids=MAX_PROCESSED_MESSAGE_IDS,
-    max_queue_size=config.message_queue_max_size,
+    on_accepted=_register_pending_memory_sequence,
+    on_rejected=_clear_pending_memory_sequence,
 )
 
 
-def message_preview(text: str, limit: int = 80) -> str:
-    preview = " ".join(str(text or "").split())
-    if len(preview) > limit:
-        return preview[:limit] + "..."
-    return preview
+CQ_REPLY_PATTERN = re.compile(
+    r"\[CQ:reply,(?:[^\]]*,)?id=([^,\]]+)[^\]]*\]",
+    re.IGNORECASE,
+)
+
+
+def get_reply_message_id(data: dict[str, Any], raw_message: str) -> str | None:
+    message = data.get("message")
+    if isinstance(message, list):
+        for segment in message:
+            if not isinstance(segment, dict) or segment.get("type") != "reply":
+                continue
+            segment_data = segment.get("data")
+            if isinstance(segment_data, dict):
+                message_id = str(
+                    segment_data.get("id")
+                    or segment_data.get("message_id")
+                    or ""
+                ).strip()
+                if message_id:
+                    return message_id
+    match = CQ_REPLY_PATTERN.search(raw_message)
+    if match:
+        return match.group(1).strip()
+    message_id = str(data.get("reply_to_message_id") or "").strip()
+    return message_id or None
 
 
 def startup() -> None:
@@ -48,8 +105,37 @@ def startup() -> None:
     if _startup_initialized:
         return
 
-    migrate_legacy_memory_files()
-    _startup_initialized = True
+    with _startup_lock:
+        if _startup_initialized:
+            return
+
+        get_persona()
+        default_data_dir = (BASE_DIR / "qqbot_data").resolve()
+        if config.data_dir.resolve() == default_data_dir:
+            migrate_legacy_data(
+                BASE_DIR / LEGACY_DATA_DIR_NAME,
+                config.data_dir,
+                config.history_turns,
+            )
+        memory_service = get_memory_service()
+        memory_service.start()
+        message_queue.ensure_sequence_at_least(
+            memory_service.store.max_job_sequence()
+        )
+        _log_search_readiness()
+        _startup_initialized = True
+
+
+def _log_search_readiness() -> None:
+    readiness = _search_readiness()
+    available = [item.provider for item in readiness if item.available]
+    if available:
+        logger.info("search_ready=true providers=%s", ",".join(available))
+    else:
+        logger.warning(
+            "search_ready=false providers=%s; closed-context tasks continue, factual requests return provider_not_configured",
+            ",".join(item.provider for item in readiness),
+        )
 
 
 def strip_bot_mention(raw_msg: str, self_id: str) -> tuple[bool, str]:
@@ -64,86 +150,49 @@ def strip_bot_mention(raw_msg: str, self_id: str) -> tuple[bool, str]:
 
 
 def split_reply(text: str) -> list[str]:
-    text = (text or "").strip()
-    if not text:
-        return []
+    from src.search.simple.rendering import split_qq_reply
+    return split_qq_reply(text, max(config.max_reply_chars, 200))
 
-    limit = max(config.max_reply_chars, 200)
-    parts = []
-    while len(text) > limit:
-        cut = max(text.rfind("\n", 0, limit), text.rfind("。", 0, limit), text.rfind("，", 0, limit))
-        if cut < limit // 2:
-            parts.append(text[:limit].strip())
-            text = text[limit:].strip()
-        else:
-            parts.append(text[: cut + 1].strip())
-            text = text[cut + 1 :].strip()
-    if text:
-        parts.append(text)
-    return parts
-
-
-import re
-
-_CQ_IMAGE_FILE = re.compile(r"\[CQ:image,file=file:///([^]]+)\]")
 
 
 def send_reply(target_id: Any, text: str, is_group: bool) -> None:
-    """Send a reply, routing embedded CQ:image codes through send_image."""
+    from src.memory.privacy import redact_hard_secrets
 
-    # Split text parts from inline image parts
-    parts = re.split(r"(\[CQ:image,file=[^]]+?\])", text)
-    # re.split captures separators into alternating positions:
-    # ["text before ", "[CQ:image,...]", " text after", ...]
-    images_sent = False  # track whether we sent at least one image
+    clean_text = redact_hard_secrets(text)
+    if clean_text != text:
+        logger.warning(
+            "Outbound reply contained sensitive secrets, redacted before sending target_id=%s is_group=%s",
+            target_id,
+            is_group,
+        )
+        text = clean_text
 
-    for part in parts:
-        stripped = (part or "").strip()
-        if not stripped:
-            continue
-
-        img_match = _CQ_IMAGE_FILE.match(stripped)
-        if img_match:
-            # Extract the local file path from the CQ code
-            file_uri = img_match.group(1)
-            from pathlib import Path
-            local_path = Path(file_uri).as_posix()
-            try:
-                # Reconstruct the native path on this platform
-                local_path = str(Path(file_uri))
-            except Exception:
-                pass
-            logger.info(
-                "send_reply detected CQ:image target_id=%s is_group=%s path=%s",
-                target_id,
-                is_group,
-                Path(file_uri).name if file_uri else "?",
-            )
-            success = onebot.send_image(target_id, local_path, is_group=is_group)
-            if success:
-                images_sent = True
-            else:
-                logger.warning(
-                    "send_reply image send failed target_id=%s is_group=%s path=%s",
-                    target_id,
-                    is_group,
-                    Path(file_uri).name if file_uri else "?",
-                )
-        else:
-            # Regular text — send as usual (preserving original split_reply behaviour
-            # for long text: we still call split_reply per text part)
-            text_parts = split_reply(stripped)
-            for tp in text_parts:
-                delay = 0.2 if images_sent else 0.2
-                onebot.send_msg(target_id, tp, is_group=is_group)
-                time.sleep(delay)
-
-    # Fallback: if there were no parts at all, treat as empty
-    if not parts or all(not (p or "").strip() for p in parts):
+    parts = split_reply(text)
+    if not parts:
         logger.info("Reply skipped: empty text target_id=%s is_group=%s", target_id, is_group)
+        return
+
+    logger.info(
+        "Sending reply target_id=%s is_group=%s parts=%s chars=%s",
+        target_id,
+        is_group,
+        len(parts),
+        len(text or ""),
+    )
+    for index, part in enumerate(parts, 1):
+        logger.info(
+            "Sending reply part target_id=%s is_group=%s part=%s/%s chars=%s",
+            target_id,
+            is_group,
+            index,
+            len(parts),
+            len(part),
+        )
+        onebot.send_msg(target_id, part, is_group=is_group)
+        time.sleep(0.2)
 
 
-def process_message(data: dict[str, Any]) -> None:
+def _process_message(data: dict[str, Any]) -> None:
     uid = str(data.get("user_id", ""))
     raw_msg = str(data.get("raw_message", "")).strip()
     if not uid or not raw_msg:
@@ -163,25 +212,23 @@ def process_message(data: dict[str, Any]) -> None:
 
     if is_group:
         logger.info(
-            "Group message received group_id=%s user_id=%s self_id=%s message_id=%s require_group_at=%s raw=%r",
+            "Group message received group_id=%s user_id=%s self_id=%s message_id=%s require_group_at=%s",
             data.get("group_id"),
             uid,
             self_id,
             data.get("message_id"),
             config.require_group_at,
-            message_preview(raw_msg),
         )
 
     if is_group and config.require_group_at:
         mentioned, raw_msg = strip_bot_mention(raw_msg, self_id)
         logger.info(
-            "Group mention check group_id=%s user_id=%s self_id=%s message_id=%s mentioned=%s stripped=%r",
+            "Group mention check group_id=%s user_id=%s self_id=%s message_id=%s mentioned=%s",
             data.get("group_id"),
             uid,
             self_id,
             data.get("message_id"),
             mentioned,
-            message_preview(raw_msg),
         )
         if not mentioned:
             logger.info(
@@ -200,20 +247,49 @@ def process_message(data: dict[str, Any]) -> None:
             )
             return
 
+    raw_msg = CQ_REPLY_PATTERN.sub("", raw_msg).strip()
+
     try:
-        route = route_message(raw_msg)
+        parsed_message = parse_image_message(data, raw_msg)
+        route_text = parsed_message.text or (
+            "[图片]" if parsed_message.image_urls else ""
+        )
+        if not route_text:
+            return
+
+        route = route_message(route_text)
         logger.info(
-            "Message routed session_key=%s is_group=%s handler=%s command=%s query=%r",
+            "Message routed session_key=%s is_group=%s handler=%s command=%s query_chars=%s",
             session_key,
             is_group,
             route.handler,
             route.command,
-            message_preview(route.query),
+            len(route.query or ""),
+        )
+        mem_ctx = MemoryContext(
+            user_id=uid,
+            session_key=session_key,
+            is_group=is_group,
+            group_id=str(data.get("group_id")) if is_group else None,
+        )
+
+        image_data_urls = load_chat_images(
+            parsed_message.image_urls,
+            image_file_ids=parsed_message.image_file_ids,
+            image_url_resolver=onebot.get_image_url,
         )
         if route.handler == "command":
             result = handle_command(
                 route,
-                CommandContext(uid=uid, session_key=session_key, raw_message=raw_msg),
+                CommandContext(
+                    uid=uid,
+                    session_key=session_key,
+                    raw_message=route_text,
+                    memory_context=mem_ctx,
+                    message_id=str(data.get("message_id") or ""),
+                    image_data_urls=tuple(image_data_urls),
+                ),
+                renderer=command_renderer,
             )
             logger.info(
                 "Command handled session_key=%s command=%s handled=%s reply_chars=%s",
@@ -226,23 +302,113 @@ def process_message(data: dict[str, Any]) -> None:
                 send_reply(target_id, result.reply, is_group)
             return
 
-        logger.info("Generating chat reply session_key=%s is_group=%s", session_key, is_group)
-        reply = generate_reply(session_key, raw_msg)
-        logger.info("Chat reply generated session_key=%s reply_chars=%s", session_key, len(reply or ""))
-        send_reply(target_id, reply, is_group)
-    except RuntimeError as error:
-        logger.exception("Configuration error")
+        reply_to_message_id = get_reply_message_id(
+            data,
+            str(data.get("raw_message") or ""),
+        )
+        reply_to_user_id = (
+            onebot.get_message_author(reply_to_message_id)
+            if reply_to_message_id
+            else None
+        )
+        if reply_to_user_id is None:
+            reply_to_user_id = (
+                str(data.get("reply_to_user_id"))
+                if data.get("reply_to_user_id")
+                else None
+            )
+        prior_context = get_recent_dialogue_context(session_key, turns=1)
+        mem_event = MemoryEvent(
+            context=mem_ctx,
+            message_id=str(data.get("message_id") or ""),
+            sequence=int(data.get("_qqbot_sequence") or 0),
+            text=parsed_message.text,
+            image_count=len(parsed_message.image_urls),
+            mentioned_qq_ids=tuple(str(qid) for qid in data.get("mentioned_qq_ids") or ()),
+            reply_to_message_id=reply_to_message_id,
+            reply_to_user_id=reply_to_user_id,
+            prior_dialogue_context=prior_context,
+        )
+        memory_service = get_memory_service()
+        job_id: int | None = None
+        try:
+            job_id = memory_service.stage_event(mem_event)
+        except Exception as error:
+            scope_type, scope_id = mem_ctx.primary_scope
+            logger.error(
+                "Memory stage failed scope_key=%s sequence=%s error_type=%s",
+                f"{scope_type}:{scope_id}",
+                mem_event.sequence,
+                type(error).__name__,
+            )
+
+        try:
+            logger.info("Generating chat reply session_key=%s is_group=%s", session_key, is_group)
+            reply = generate_reply(
+                session_key,
+                parsed_message.text,
+                image_data_urls=image_data_urls,
+                mode=SearchMode.LIGHT,
+            )
+            logger.info("Chat reply generated session_key=%s reply_chars=%s", session_key, len(reply or ""))
+            send_reply(target_id, reply, is_group)
+
+        finally:
+            if job_id is not None:
+                try:
+                    memory_service.release_job(job_id, image_data_urls)
+                except Exception as error:
+                    logger.error(
+                        "Memory release failed job_id=%s error_type=%s",
+                        job_id,
+                        type(error).__name__,
+                    )
+
+    except ImageInputError as error:
+        send_reply(target_id, str(error), is_group)
+    except ImageRecognitionUnavailable as error:
+        logger.info("Image recognition unavailable session_key=%s", session_key)
+        send_reply(target_id, str(error), is_group)
+    except PersonaConfigurationError as error:
+        logger.error(
+            "Configuration error error_type=%s",
+            type(error).__name__,
+        )
         send_reply(target_id, f"配置还没好：{error}", is_group)
-    except Exception:
-        logger.exception("Message handling failed")
+    except Exception as error:
+        logger.error(
+            "Message handling failed error_type=%s",
+            type(error).__name__,
+        )
         send_reply(target_id, "我这边处理失败了，先缓一缓再试。", is_group)
+
+
+def process_message(data: dict[str, Any]) -> None:
+    scope_key = get_event_memory_scope_key(data)
+    sequence = int(data.get("_qqbot_sequence") or 0)
+    try:
+        _process_message(data)
+    finally:
+        if scope_key and sequence > 0:
+            try:
+                get_memory_service().clear_pending_sequence(scope_key, sequence)
+            except Exception as error:
+                logger.error(
+                    "Memory sequence cleanup failed scope_key=%s sequence=%s error_type=%s",
+                    scope_key,
+                    sequence,
+                    type(error).__name__,
+                )
 
 
 def process_message_safely(data: dict[str, Any]) -> None:
     try:
         process_message(data)
-    except Exception:
-        logger.exception("Background message processing failed")
+    except Exception as error:
+        logger.error(
+            "Background message processing failed error_type=%s",
+            type(error).__name__,
+        )
 
 
 def is_callback_authorized() -> bool:
@@ -251,10 +417,17 @@ def is_callback_authorized() -> bool:
         return True
 
     authorization = request.headers.get("Authorization", "").strip()
-    callback_secret = request.headers.get("X-ATRI-Callback-Secret", "").strip()
-    return hmac.compare_digest(authorization, f"Bearer {secret}") or hmac.compare_digest(
-        callback_secret, secret
-    )
+    callback_secret = request.headers.get(CALLBACK_SECRET_HEADER, "").strip()
+    legacy_secret = request.headers.get(LEGACY_CALLBACK_SECRET_HEADER, "").strip()
+    if hmac.compare_digest(authorization, f"Bearer {secret}") or hmac.compare_digest(
+        callback_secret,
+        secret,
+    ):
+        return True
+    if legacy_secret and hmac.compare_digest(legacy_secret, secret):
+        logger.warning("Legacy callback header accepted; update OneBot configuration")
+        return True
+    return False
 
 
 @app.route("/", methods=["POST"])
@@ -263,6 +436,7 @@ def onebot_event() -> dict[str, str] | tuple[dict[str, str], int]:
         logger.warning("Rejected unauthorized OneBot callback")
         return {"status": "forbidden"}, 403
 
+    startup()
     data = request.get_json(silent=True) or {}
     if data.get("post_type") == "message":
         seen = mark_message_seen(data, message_queue)
@@ -281,19 +455,40 @@ def onebot_event() -> dict[str, str] | tuple[dict[str, str], int]:
 
 @app.route("/health", methods=["GET"])
 def health() -> dict[str, Any]:
+    persona = get_persona()
+    readiness = _search_readiness()
     return {
         "status": "ok",
-        "bot_name": config.bot_name,
+        "bot_name": persona.name,
+        "chat_models": [
+            {"provider": item.provider, "model": item.model}
+            for item in config.chat_models
+        ],
         "gemini_configured": bool(config.gemini_api_key),
         "deepseek_configured": bool(config.deepseek_api_key),
         "onebot_url": config.onebot_url,
         "require_group_at": config.require_group_at,
+        "search_ready": any(item.available for item in readiness),
+        "search_providers": [
+            {
+                "provider": item.provider,
+                "configured": item.configured,
+                "available": item.available,
+            }
+            for item in readiness
+        ],
     }
+
+
+def _search_readiness() -> list[Any]:
+    from src.search.simple.factory import get_search_readiness
+    return list(get_search_readiness())
+
 
 
 def run() -> None:
     startup()
-    logger.info("Starting %s on %s:%s", config.bot_name, config.host, config.port)
+    logger.info("Starting %s on %s:%s", get_persona().name, config.host, config.port)
     app.run(host=config.host, port=config.port)
 
 

@@ -38,7 +38,8 @@ from src.search.simple.rendering import (
     render_search_answer,
     render_search_failure,
 )
-from src.services.llm_client import get_llm_client
+from src.search.simple.router import SearchRouter
+from src.services.llm_client import ImageRecognitionUnavailable, get_llm_client
 from src.services.llm_types import ChatResponse
 from src.utils.storage import read_json, safe_id, write_json
 
@@ -298,9 +299,20 @@ def _plain_reply(
             "content": build_user_content(text, images),
         }
     )
-    response = llm.chat(messages, temperature=0.7, timeout_seconds=timeout_seconds)
-    content = getattr(response, "content", "")
-    return str(content or "").strip()
+    try:
+        response = llm.chat(messages, temperature=0.7, timeout_seconds=timeout_seconds)
+        content = getattr(response, "content", "")
+        text_reply = str(content or "").strip()
+        return text_reply or "暂时无法回复，请稍后再试。"
+    except ImageRecognitionUnavailable as err:
+        return str(err)
+    except Exception as exc:
+        logger.warning("_plain_reply failed (%s)", type(exc).__name__)
+        if video_payload:
+            return "视频内容暂时无法读取或解析，请稍后再试。"
+        if webpage_payload:
+            return "网页内容暂时无法读取或解析，请稍后再试。"
+        return "暂时无法回复，请稍后再试。"
 
 
 def generate_reply(
@@ -308,8 +320,9 @@ def generate_reply(
     text: str,
     image_data_urls: list[str] | None = None,
     *,
-    mode: SearchMode,
+    mode: SearchMode | None = None,
     history_text: str | None = None,
+    router: SearchRouter | None = None,
 ) -> str:
     mem_ctx = _ensure_context(context)
     session_key = mem_ctx.session_key
@@ -401,7 +414,33 @@ def generate_reply(
                 )
                 return reply
 
-            if mode is SearchMode.SKIP:
+            # ── 模式裁决与检索主题 ──
+            active_topics: tuple[str, ...] = ()
+            effective_mode: SearchMode = mode if mode is not None else SearchMode.SKIP
+            if mode is None:
+                # 无命令普通消息：由 SearchRouter 依据检索收益裁决 (仅在 skip 与 light 间选择)
+                search_router = router if router is not None else SearchRouter()
+                decision = search_router.route(normalized_text, tuple(images))
+                logger.info(
+                    "Search router decision mode=%s reason=%s topics=%s",
+                    decision.mode.value,
+                    decision.reason_code,
+                    decision.retrieval_topics,
+                )
+                if decision.mode is SearchMode.SKIP:
+                    reply = _plain_reply(
+                        mem_ctx,
+                        normalized_text,
+                        images,
+                        timeout_seconds=timeout,
+                    )
+                    return reply
+                effective_mode = SearchMode.LIGHT
+                active_topics = decision.retrieval_topics
+            else:
+                effective_mode = mode
+
+            if effective_mode is SearchMode.SKIP:
                 reply = _plain_reply(
                     mem_ctx,
                     normalized_text,
@@ -411,16 +450,17 @@ def generate_reply(
                 return reply
 
             request = SearchRequest(
-                mode=mode,
+                mode=effective_mode,
                 text=normalized_text,
                 images=tuple(images),
-                source=RequestSource.CHAT if mode is SearchMode.LIGHT else RequestSource.COMMAND,
+                source=RequestSource.CHAT if effective_mode is SearchMode.LIGHT else RequestSource.COMMAND,
+                topics=active_topics,
             )
             pipeline = get_simple_search_pipeline_for_chat()
             outcome = pipeline.run(request)
 
             if outcome.failure is not None:
-                if mode is SearchMode.LIGHT:
+                if effective_mode is SearchMode.LIGHT:
                     logger.info(
                         "Light search yielded no usable results (%s), falling back to plain conversation",
                         outcome.failure.value,
@@ -455,7 +495,7 @@ def generate_reply(
                 answer_res.text,
                 outcome.results,
                 warning=None,
-                show_sources=(mode is SearchMode.STANDARD),
+                show_sources=(effective_mode is SearchMode.STANDARD),
                 qq_limit=_qq_limit(),
                 trace=outcome.trace,
             )
@@ -467,8 +507,8 @@ def generate_reply(
                 reply = "视频内容暂时无法读取或解析，请稍后再试。"
             elif webpage_payload:
                 reply = "网页内容暂时无法读取或解析，请稍后再试。"
-            elif mode is SearchMode.SKIP:
-                reply = "服务暂时遇到一点问题，请稍后再试。"
+            elif effective_mode is SearchMode.SKIP:
+                reply = "暂时无法回复，请稍后再试。"
             else:
                 reply = "在线搜索暂时不可用，请稍后再试。"
             return reply

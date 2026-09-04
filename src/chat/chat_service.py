@@ -11,9 +11,15 @@ from src.chat.prompt import (
     _ensure_context,
     build_search_system_prompt,
     build_untrusted_context,
+    format_bilibili_video_sandbox,
     format_external_webpage_sandbox,
 )
 from src.services.url_fetch_service import extract_first_url, fetch_document
+from src.services.video_service import (
+    extract_bilibili_id,
+    fetch_bilibili_video,
+    is_bilibili_video_url,
+)
 from src.config import config
 from src.memory.models import MemoryContext
 from src.search.simple.answering import SearchAnswerer
@@ -308,8 +314,50 @@ def generate_reply(
         try:
             timeout = float(getattr(config, "search_answer_timeout", 20.0))
 
-            # ── 聊天 URL 前置自动直读与注入 ──
+            # ── 聊天 B站视频 前置直读与注入 ──
             url = extract_first_url(normalized_text)
+            video_payload = ""
+            if is_bilibili_video_url(normalized_text) or (url and is_bilibili_video_url(url)):
+                target_for_id = normalized_text if is_bilibili_video_url(normalized_text) else (url or "")
+                try:
+                    bvid, aid = extract_bilibili_id(target_for_id)
+                    if bvid or aid:
+                        video = fetch_bilibili_video(bvid=bvid, aid=aid)
+                        if video.ok:
+                            video_payload = format_bilibili_video_sandbox(video)
+                            logger.info(
+                                "Bilibili video direct fetch succeeded bvid=%s aid=%s title=%s subs=%s",
+                                bvid,
+                                aid,
+                                video.title,
+                                video.has_subtitles,
+                            )
+                        else:
+                            logger.info(
+                                "Bilibili video direct fetch degraded bvid=%s aid=%s status=%s err=%s",
+                                bvid,
+                                aid,
+                                video.status,
+                                video.error_message,
+                            )
+                except Exception as vid_err:
+                    logger.warning(
+                        "Bilibili video direct fetch unexpected error err=%s",
+                        type(vid_err).__name__,
+                    )
+
+            if video_payload:
+                # 抓取到B站视频及字幕信息后，直接基于视频内容回答，短路冗余网络搜索
+                reply = _plain_reply(
+                    mem_ctx,
+                    normalized_text,
+                    images,
+                    timeout_seconds=timeout,
+                    video_payload=video_payload,
+                )
+                return reply
+
+            # ── 聊天 URL 前置自动直读与注入 ──
             webpage_payload = ""
             if url:
                 try:

@@ -880,6 +880,13 @@ def _video_command(query: str, context: CommandContext, _store: MemoryStore) -> 
     return CommandResult(handled=True, reply=reply, outcome=outcome)
 
 
+def _bili_user_command(query: str, context: CommandContext, _store: MemoryStore) -> CommandResult:
+    from .bili_user import bili_user_reply
+    reply = bili_user_reply(query, context)
+    outcome = CommandOutcome(code="bili_user", facts=(), fallback_reply=reply, already_rendered=True)
+    return CommandResult(handled=True, reply=reply, outcome=outcome)
+
+
 COMMANDS: dict[str, CommandHandler] = {
     "help": _help_command,
     "h": _help_command,
@@ -889,6 +896,8 @@ COMMANDS: dict[str, CommandHandler] = {
     "video": _video_command,
     "v": _video_command,
     "bv": _video_command,
+    "up": _bili_user_command,
+    "biliup": _bili_user_command,
     "remember": _remember_command,
     "memo": _remember_command,
     "globalremember": _global_remember_command,

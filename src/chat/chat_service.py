@@ -258,6 +258,7 @@ def _plain_reply(
     *,
     timeout_seconds: float,
     webpage_payload: str = "",
+    video_payload: str = "",
 ) -> str:
     from src.chat.prompt import build_system_prompt
 
@@ -272,6 +273,7 @@ def _plain_reply(
                 evidence_payload="",
                 include_memories=True,
                 webpage_payload=webpage_payload,
+                video_payload=video_payload,
             ),
         },
     ]

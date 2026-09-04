@@ -873,12 +873,22 @@ def _skip_command(query: str, context: CommandContext, _store: MemoryStore) -> C
     return CommandResult(handled=True, reply=reply, outcome=outcome)
 
 
+def _video_command(query: str, context: CommandContext, _store: MemoryStore) -> CommandResult:
+    from .video import video_reply
+    reply = video_reply(query, context)
+    outcome = CommandOutcome(code="video", facts=(), fallback_reply=reply, already_rendered=True)
+    return CommandResult(handled=True, reply=reply, outcome=outcome)
+
+
 COMMANDS: dict[str, CommandHandler] = {
     "help": _help_command,
     "h": _help_command,
     "search": _search_command,
     "s": _search_command,
     "skip": _skip_command,
+    "video": _video_command,
+    "v": _video_command,
+    "bv": _video_command,
     "remember": _remember_command,
     "memo": _remember_command,
     "globalremember": _global_remember_command,

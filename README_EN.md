@@ -2,7 +2,7 @@
 
 **[English](README_EN.md)** | **[简体中文](README.md)**
 
-> A lightweight QQ chat bot built on the OneBot protocol, powered by Gemini and DeepSeek models. Features conversational context, automatic webpage URL direct-reading, deterministic grounded web search, multimodal vision understanding, fine-grained structured memory, and a triple-layer prompt injection defense mechanism.
+> A lightweight QQ chat bot built on the OneBot protocol, powered by Gemini and DeepSeek models. Features conversational context, automatic webpage URL direct-reading, fast Bilibili video & subtitle summarization, deterministic grounded web search, multimodal vision understanding, fine-grained structured memory, and a triple-layer prompt injection defense mechanism.
 
 ---
 
@@ -10,6 +10,7 @@
 
 - **💬 Conversational Context**: Guarantees FIFO session ordering, supports custom persona configurations (`config/persona.md`), and provides multi-turn history management.
 - **🌐 Automatic URL Direct-Reading**: Automatically detects HTTP/HTTPS URLs in user messages, fetches webpage content within a 5-second timeout, and injects it into an XML sandbox to summarize/answer, short-circuiting redundant web searches; prevents token bloating in persistent chat history.
+- **📺 Fast Bilibili Video Summarization**: Lightweight native extraction of Bilibili video metadata and CC/AI subtitle text. Supports explicit `/video <url/BV>` (aliases `/v`, `/bv`) commands as well as posting Bilibili video links or IDs directly in chat (`bilibili.com/video/BV...`, `b23.tv/...`, or BV/av IDs) for automatic direct-reading and summary while short-circuiting web search. Pure native HTTP API with zero headless browser or Playwright overhead; subtitle text is truncated at 20,000 characters and safely escaped into an XML sandbox.
 - **🔍 Deterministic Grounded Search**: Tavily is the primary search provider, with seamless fallback to DDGS (DDGS stage timeout defaults to 15s). Normal chat is strictly locked to `LIGHT mode` (single query, replies do not expose source numbers, titles, or URLs), while explicit `/search` uses `STANDARD mode` (multi-query with source citations). Supports `/skip` to bypass web search entirely. Transparently handles network unavailability, insufficient evidence, and inconsistent premise/entity names with fixed boundary degradation, ensuring answers are grounded only on available evidence without hallucinating online sources. Automatically removes date filters and retries Tavily once if parameter range constraints are rejected. Search traces record audit metadata while stripping all sensitive content.
 - **🛡️ Triple-Layer Prompt Injection Defense**:
   1. **XML Semantic Sandbox**: External webpage text is fully escaped with XML entities and encapsulated within `<external_webpage_content>` tags;
@@ -17,7 +18,7 @@
   3. **Outbound Credential Redaction**: All replies pass through an automated secret scanner before dispatch via OneBot, redacting API keys, passwords, and private keys into `[redacted:credential]`.
 - **🖼️ Multimodal Vision Input**: Supports sending single images or mixed image+text messages (up to 4 images per message, max 5 MiB each) for visual recognition and understanding; image generation, editing, or proactive image sending are not supported.
 - **🧠 Fine-Grained Structured Memory**: SQLite-backed persistent memory supporting private, group, and global scopes, with full lifecycle management including automatic extraction, correction, retraction, disputing, and physical deletion. Supports dedicated memory keys (`MEMORY_GEMINI_API_KEY`) for physical quota isolation between foreground chat and background memory, preventing 15 RPM rate limiting.
-- **Clean Scope**: Intentionally focused with clear boundaries; does not support video understanding, weather/Bilibili plugins, or complex multi-agent setups. `/search <keyword>` focuses strictly on keyword search (does not provide standalone URL direct-fetch); chat-based URL direct-reading is handled automatically by the system.
+- **Clean Scope**: Intentionally focused with clear boundaries; does not support general video stream visual frames analysis, weather, or heavy crawlers / multi-agent setups. `/search <keyword>` focuses strictly on keyword search (does not provide standalone URL direct-fetch); chat-based URL/video direct-reading is handled automatically by the system.
 
 ```text
 QQ User
@@ -128,12 +129,13 @@ All configurations are maintained in `.env` (`KEY=value` format, lines starting 
 
 ## Usage & Commands
 
-Messages not starting with `/` enter normal conversation. If a message contains an HTTP/HTTPS URL, the bot will automatically direct-read the webpage content in a sandbox, short-circuiting search; general questions will trigger grounded web search in LIGHT mode as needed.
+Messages not starting with `/` enter normal conversation. If a message contains an HTTP/HTTPS URL or a Bilibili video (link, short link, or BV/av ID), the bot will automatically direct-read the webpage content or video subtitles in a sandbox, short-circuiting search; general questions will trigger grounded web search in LIGHT mode as needed.
 
 | Command | Alias | Description |
 |---|---|---|
 | `/search <keyword>` | `/s <keyword>` | Explicit web search (STANDARD mode), generating multiple queries with source links. |
 | `/skip [prompt]` | None | Bypass web search entirely (SKIP mode), directly answered by the LLM with zero search latency/traces. |
+| `/video <url or BV>` | `/v`, `/bv` | Fetch Bilibili video metadata and CC/AI subtitles for structured summary, short-circuiting web search. |
 | `/remember <text>` | `/memo <text>` | Save personal preferences or current group-specific memory. |
 | `/globalremember <text>` | `/gremember <text>` | Save global shared memory configurations (Admin only). |
 | `/memories [query]` | None | View or search authorized memory entries accessible in the current scope. |

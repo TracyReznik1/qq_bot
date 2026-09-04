@@ -26,7 +26,7 @@ BILIBILI_PLAYER_URL = "https://api.bilibili.com/x/player/wbi/v2"
 
 BILIBILI_BV_ID_PATTERN = re.compile(r"(?i)(?<![0-9A-Za-z])BV[0-9A-Za-z]{10}(?![0-9A-Za-z])")
 BILIBILI_AV_ID_PATTERN = re.compile(r"(?i)(?<![0-9A-Za-z])av(\d+)(?![0-9A-Za-z])")
-BILIBILI_SHORT_LINK_PATTERN = re.compile(r"(?i)https?://b23\.tv/[^\s<>'\"]+")
+BILIBILI_SHORT_LINK_PATTERN = re.compile(r"(?i)https?://b23\.tv/[a-zA-Z0-9._~:/?#\[\]@!$&'()*+,;%=-]+")
 MAX_SUBTITLE_CHARS = 20000
 
 MIXIN_KEY_ENC_TAB = [

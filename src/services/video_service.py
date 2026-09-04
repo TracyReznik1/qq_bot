@@ -23,11 +23,36 @@ logger = logging.getLogger("qq-bot")
 BILIBILI_NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
 BILIBILI_VIEW_URL = "https://api.bilibili.com/x/web-interface/wbi/view"
 BILIBILI_PLAYER_URL = "https://api.bilibili.com/x/player/wbi/v2"
+BILIBILI_SEARCH_USER_URL = "https://api.bilibili.com/x/web-interface/wbi/search/type"
+BILIBILI_USER_CARD_URL = "https://api.bilibili.com/x/web-interface/card"
 
 BILIBILI_BV_ID_PATTERN = re.compile(r"(?i)(?<![0-9A-Za-z])BV[0-9A-Za-z]{10}(?![0-9A-Za-z])")
 BILIBILI_AV_ID_PATTERN = re.compile(r"(?i)(?<![0-9A-Za-z])av(\d+)(?![0-9A-Za-z])")
 BILIBILI_SHORT_LINK_PATTERN = re.compile(r"(?i)https?://b23\.tv/[a-zA-Z0-9._~:/?#\[\]@!$&'()*+,;%=-]+")
 MAX_SUBTITLE_CHARS = 20000
+
+
+@dataclass(frozen=True)
+class BilibiliUserVideo:
+    bvid: str
+    title: str
+
+
+@dataclass(frozen=True)
+class BilibiliUserPayload:
+    ok: bool
+    status: str
+    mid: int = 0
+    uname: str = ""
+    usign: str = ""
+    fans: int = 0
+    videos: int = 0
+    level: int = 0
+    verify_info: str = ""
+    is_live: bool = False
+    room_id: int = 0
+    recent_videos: tuple[BilibiliUserVideo, ...] = ()
+    error_message: str = ""
 
 MIXIN_KEY_ENC_TAB = [
     46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
@@ -355,3 +380,175 @@ def fetch_bilibili_video(
         has_subtitles=has_subtitles,
         subtitles_text=subtitles_text,
     )
+
+
+def _format_count(num: int) -> str:
+    if num >= 100000000:
+        return f"{num / 100000000:.1f}亿"
+    if num >= 10000:
+        return f"{num / 10000:.1f}万"
+    return str(num)
+
+
+def format_bilibili_user_card(payload: BilibiliUserPayload) -> str:
+    if not payload.ok:
+        return payload.error_message or "未找到相关 B站 UP主。"
+
+    lines = [
+        "📺 B站 UP主名片",
+        "━━━━━━━━━━━━━━",
+        f"【{payload.uname}】 (UID: {payload.mid})",
+    ]
+    if payload.verify_info:
+        lines.append(f"🎖️ 认证：{payload.verify_info}")
+
+    fans_str = _format_count(payload.fans)
+    level_str = f" | 等级：Lv{payload.level}" if payload.level else ""
+    lines.append(f"👥 粉丝：{fans_str} | 🎬 投稿：{payload.videos}部{level_str}")
+
+    if payload.usign:
+        sign = payload.usign.strip()
+        if len(sign) > 100:
+            sign = f"{sign[:97]}..."
+        lines.append(f"📝 签名：{sign}")
+
+    if payload.is_live:
+        room = f" (房间号: {payload.room_id})" if payload.room_id else ""
+        lines.append(f"🔴 直播中{room}")
+    else:
+        lines.append("⚪ 未开播")
+
+    if payload.recent_videos:
+        lines.append("")
+        lines.append("📌 最新/代表投稿：")
+        for idx, vid in enumerate(payload.recent_videos, 1):
+            lines.append(f"{idx}. 《{vid.title}》 ({vid.bvid})")
+        lines.append("💡 提示：发送 /video <BV号> 可直接总结对应视频")
+
+    return "\n".join(lines)
+
+
+def fetch_bilibili_user(keyword_or_mid: str) -> BilibiliUserPayload:
+    query = str(keyword_or_mid or "").strip()
+    if not query:
+        return BilibiliUserPayload(
+            ok=False,
+            status="invalid_query",
+            error_message="请输入有效的 UP主名称或 UID。",
+        )
+
+    mid_candidate = query
+    if mid_candidate.lower().startswith("uid:"):
+        mid_candidate = mid_candidate[4:].strip()
+
+    if mid_candidate.isdigit() and len(mid_candidate) <= 18:
+        try:
+            resp = try_proxied_get(
+                BILIBILI_USER_CARD_URL,
+                params={"mid": mid_candidate, "photo": "true"},
+                proxies=config.proxies,
+                timeout=getattr(config, "request_timeout", 8.0),
+                headers=_headers(),
+            )
+            data = resp.json()
+            if isinstance(data, dict) and data.get("code") == 0:
+                card_data = data.get("data") or {}
+                card = card_data.get("card") or {}
+                uname = str(card.get("name") or "").strip()
+                if uname:
+                    mid = int(card.get("mid") or mid_candidate)
+                    fans = int(card_data.get("follower") or card.get("fans") or 0)
+                    videos = int(card_data.get("archive_count") or 0)
+                    sign = str(card.get("sign") or "").strip()
+                    level = int(card.get("level_info", {}).get("current_level") or 0)
+                    official = card.get("official_verify") or {}
+                    verify_info = str(official.get("desc") or "").strip()
+
+                    return BilibiliUserPayload(
+                        ok=True,
+                        status="success",
+                        mid=mid,
+                        uname=uname,
+                        usign=sign,
+                        fans=fans,
+                        videos=videos,
+                        level=level,
+                        verify_info=verify_info,
+                        is_live=False,
+                        room_id=0,
+                        recent_videos=(),
+                    )
+        except Exception as exc:
+            logger.debug("Bilibili user card fetch failed: %s", exc)
+
+    params = sign_wbi_params({"search_type": "bili_user", "keyword": query})
+    try:
+        resp = try_proxied_get(
+            BILIBILI_SEARCH_USER_URL,
+            params=params,
+            proxies=config.proxies,
+            timeout=getattr(config, "request_timeout", 10.0),
+            headers=_headers(),
+        )
+        payload = resp.json()
+    except Exception as exc:
+        logger.warning("Bilibili user search request failed: %s", exc)
+        return BilibiliUserPayload(
+            ok=False,
+            status="network_error",
+            error_message="访问 B站 UP主搜索接口失败，请检查网络或稍后再试。",
+        )
+
+    if not isinstance(payload, dict) or payload.get("code") != 0:
+        msg = payload.get("message") if isinstance(payload, dict) else "接口异常"
+        return BilibiliUserPayload(
+            ok=False,
+            status="api_error",
+            error_message=f"B站搜索接口返回错误: {msg}",
+        )
+
+    results = payload.get("data", {}).get("result")
+    if not results or not isinstance(results, list):
+        return BilibiliUserPayload(
+            ok=False,
+            status="not_found",
+            error_message=f"未找到与 “{query}” 相关的 B站 UP主，请检查后重试。",
+        )
+
+    top_user = results[0]
+    mid = int(top_user.get("mid") or 0)
+    uname = str(top_user.get("uname") or "").strip()
+    usign = str(top_user.get("usign") or "").strip()
+    fans = int(top_user.get("fans") or 0)
+    videos = int(top_user.get("videos") or 0)
+    level = int(top_user.get("level") or 0)
+    is_live = bool(top_user.get("is_live"))
+    room_id = int(top_user.get("room_id") or 0)
+
+    official = top_user.get("official_verify") or {}
+    verify_info = str(official.get("desc") or top_user.get("verify_info") or "").strip()
+
+    recent_videos: list[BilibiliUserVideo] = []
+    for item in top_user.get("res") or []:
+        if isinstance(item, dict):
+            bvid = str(item.get("bvid") or "").strip()
+            vtitle = str(item.get("title") or "").strip()
+            vtitle = re.sub(r"<[^>]+>", "", vtitle)
+            if bvid and vtitle:
+                recent_videos.append(BilibiliUserVideo(bvid=bvid, title=vtitle))
+
+    return BilibiliUserPayload(
+        ok=True,
+        status="success",
+        mid=mid,
+        uname=uname,
+        usign=usign,
+        fans=fans,
+        videos=videos,
+        level=level,
+        verify_info=verify_info,
+        is_live=is_live,
+        room_id=room_id,
+        recent_videos=tuple(recent_videos),
+    )
+

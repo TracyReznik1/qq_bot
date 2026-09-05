@@ -8,9 +8,10 @@ class OutboundSecretScanningTests(unittest.TestCase):
     @patch("src.main.onebot")
     def test_send_reply_redacts_outbound_secrets(self, mock_onebot):
         mock_onebot.send_msg = MagicMock()
+        mock_gemini_key = "AIza" + "SyMockTestKeyNotRealForRedactionCheck123"
         malicious_text = (
             "我的 API Key 是 sk-abcdefghijklmnopqrstuvwxyz123456，"
-            "还有 Gemini 密钥 AIzaSyAbCdEfGhIjKlMnOpQrStUvWxYz0123456。"
+            f"还有 Gemini 密钥 {mock_gemini_key}。"
         )
         send_reply("1001", malicious_text, is_group=False)
 
@@ -20,7 +21,7 @@ class OutboundSecretScanningTests(unittest.TestCase):
 
         self.assertEqual("1001", target_id)
         self.assertNotIn("sk-abcdefghijklmnopqrstuvwxyz123456", sent_text)
-        self.assertNotIn("AIzaSyAbCdEfGhIjKlMnOpQrStUvWxYz0123456", sent_text)
+        self.assertNotIn(mock_gemini_key, sent_text)
         self.assertIn("[redacted:credential]", sent_text)
 
     @patch("src.main.onebot")
